@@ -34,10 +34,58 @@ struct alignas(8) FlowKey {
     return std::memcmp(this, &other, sizeof(FlowKey)) == 0;
   }
 };
+// --- 1. The Key Struct ---
+struct alignas(8) UserKey {
+  std::array<uint8_t, 16> ip;
+  bool isIPv6;
+
+  // 3 bytes of invisible padding are added here automatically by alignas(8)
+
+  UserKey() { std::memset(this, 0, sizeof(UserKey)); }
+
+  bool operator==(const UserKey &other) const {
+    return std::memcmp(this, &other, sizeof(UserKey)) == 0;
+  }
+};
 // --- 2. Standard Hash Specialization ---
 // This allows you to use std::unordered_set<FlowKey> directly.
 // 2. High-Performance Block Hash
 namespace std {
+template <> struct hash<UserKey> {
+  std::size_t operator()(const UserKey &k) const {
+    // We read the struct as 3 chunks of 64-bit integers.
+    // Using memcpy is the "Strict Aliasing Safe" way to do this.
+    // The compiler optimizes this memcpy away completely into register loads.
+
+    uint64_t buffer[3];
+    std::memcpy(buffer, &k, sizeof(UserKey)); // Copy 24 bytes
+
+    // MurmurHash3-style mixing constants
+    uint64_t h = 0;
+    const uint64_t kMul = 0x9ddfea08eb382d69ULL;
+
+    // Unrolled loop for the 3 blocks
+    auto mix = [&](uint64_t block) {
+      block *= kMul;
+      block ^= (block >> 47);
+      block *= kMul;
+      h ^= block;
+      h *= kMul;
+    };
+
+    mix(buffer[0]);
+    mix(buffer[1]);
+    mix(buffer[2]);
+
+    // Final avalanche
+    h ^= (h >> 47);
+    h *= kMul;
+    h ^= (h >> 47);
+
+    return static_cast<size_t>(h);
+  }
+};
+
 template <> struct hash<FlowKey> {
   std::size_t operator()(const FlowKey &k) const {
     // We read the struct as 5 chunks of 64-bit integers.
@@ -79,7 +127,8 @@ struct ProtocolStats {
   uint64_t packetCount = 0;
   uint64_t totalBytes = 0;
   std::unordered_set<FlowKey>
-      connections; // Uses std::hash<FlowKey> automatically
+      connections;                   // Uses std::hash<FlowKey> automatically
+  std::unordered_set<UserKey> users; // Uses std::hash<UserKey> automatically
 };
 
 int main(int argc, char *argv[]) {
@@ -111,7 +160,8 @@ int main(int argc, char *argv[]) {
 
     pcpp::IPv4Address srcAddr4, dstAddr4;
     pcpp::IPv6Address srcAddr6, dstAddr6;
-    FlowKey currentKey;
+    FlowKey currentConnection;
+    UserKey currentUser;
 
     // --- Layer 3: Network ---
     if (parsedPacket.isPacketOfType(pcpp::IPv4)) {
@@ -164,28 +214,37 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Canonicalization ---
-    currentKey.isIPv6 = isV6;
+    currentConnection.isIPv6 = isV6;
+    currentUser.isIPv6 = isV6;
 
     // Compare IPs to decide order (canonical direction)
     int cmp = std::memcmp(srcIPBytes, dstIPBytes, isV6 ? 16 : 4);
 
-    if (cmp < 0 || (cmp == 0 && srcPort < dstPort)) {
-      std::memcpy(currentKey.ipA.data(), srcIPBytes, isV6 ? 16 : 4);
-      std::memcpy(currentKey.ipB.data(), dstIPBytes, isV6 ? 16 : 4);
-      currentKey.portA = srcPort;
-      currentKey.portB = dstPort;
+    if (cmp < 0 || (cmp == 0 && srcPort > dstPort)) {
+      std::memcpy(currentConnection.ipA.data(), srcIPBytes, isV6 ? 16 : 4);
+      std::memcpy(currentConnection.ipB.data(), dstIPBytes, isV6 ? 16 : 4);
+      currentConnection.portA = srcPort;
+      currentConnection.portB = dstPort;
     } else {
-      std::memcpy(currentKey.ipA.data(), dstIPBytes, isV6 ? 16 : 4);
-      std::memcpy(currentKey.ipB.data(), srcIPBytes, isV6 ? 16 : 4);
-      currentKey.portA = dstPort;
-      currentKey.portB = srcPort;
+      std::memcpy(currentConnection.ipA.data(), dstIPBytes, isV6 ? 16 : 4);
+      std::memcpy(currentConnection.ipB.data(), srcIPBytes, isV6 ? 16 : 4);
+      currentConnection.portA = dstPort;
+      currentConnection.portB = srcPort;
+    }
+    if (srcPort > dstPort) {
+      // Src is likely the Client (User)
+      std::memcpy(currentUser.ip.data(), srcIPBytes, isV6 ? 16 : 4);
+    } else {
+      // Dst is likely the Client (User)
+      std::memcpy(currentUser.ip.data(), dstIPBytes, isV6 ? 16 : 4);
     }
 
     // --- Stats Update ---
     auto &stats = protocol_data[protocolName];
     stats.packetCount++;
     stats.totalBytes += rawPacket.getRawDataLen();
-    stats.connections.insert(currentKey);
+    stats.connections.insert(currentConnection);
+    stats.users.insert(currentUser);
   }
 
   pcap_reader->close();
@@ -194,11 +253,13 @@ int main(int argc, char *argv[]) {
   uint64_t grandTotalBytes = 0;
   uint64_t grandTotalPackets = 0;
   uint64_t grandTotalConnections = 0;
+  uint64_t grandTotalUsers = 0;
 
   for (const auto &kv : protocol_data) {
     grandTotalBytes += kv.second.totalBytes;
     grandTotalPackets += kv.second.packetCount;
     grandTotalConnections += kv.second.connections.size();
+    grandTotalUsers += kv.second.users.size();
   }
 
   // Sort Results (Sorting by Volume)
@@ -213,13 +274,15 @@ int main(int argc, char *argv[]) {
   std::ofstream csvFile(outputCsvFile);
   if (csvFile.is_open()) {
     csvFile << "Protocol,Packet_Count,Pct_Packets,Total_Bytes,Pct_Bytes,"
-               "Distinct_Connections,Pct_Connections\n";
+               "Distinct_Connections,Pct_Connections,Distinct_Users,"
+               "Pct_Users\n";
     csvFile << std::fixed << std::setprecision(4);
 
     for (const auto &item : sorted_results) {
       double pctBytes = 0.0;
       double pctPackets = 0.0;
       double pctConns = 0.0;
+      double pctUsers = 0.0;
 
       if (grandTotalBytes > 0)
         pctBytes =
@@ -235,11 +298,15 @@ int main(int argc, char *argv[]) {
         pctConns = (static_cast<double>(item.second.connections.size()) /
                     grandTotalConnections) *
                    100.0;
+      if (grandTotalUsers > 0)
+        pctUsers =
+            (static_cast<double>(item.second.users.size()) / grandTotalUsers) *
+            100.0;
 
       csvFile << item.first << "," << item.second.packetCount << ","
               << pctPackets << "," << item.second.totalBytes << "," << pctBytes
-              << "," << item.second.connections.size() << "," << pctConns
-              << "\n";
+              << "," << item.second.connections.size() << "," << pctConns << ","
+              << item.second.users.size() << "," << pctUsers << "\n";
     }
     csvFile.close();
     std::cout << "CSV written to " << outputCsvFile << std::endl;
@@ -250,3 +317,4 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
+
