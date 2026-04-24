@@ -8,6 +8,7 @@
 #include <gflags/gflags.h>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -20,6 +21,16 @@
 #include <pcapplusplus/PcapFileDevice.h>
 #include <pcapplusplus/TcpLayer.h>
 #include <pcapplusplus/UdpLayer.h>
+
+#ifdef USE_DPDK
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <pcapplusplus/DpdkDevice.h>
+#include <pcapplusplus/DpdkDeviceList.h>
+#include <pcapplusplus/MBufRawPacket.h>
+#include <thread>
+#endif
 
 // --- 1. The Key Struct ---
 struct alignas(8) FlowKey {
@@ -141,11 +152,122 @@ struct ProtocolStats {
   std::unordered_map<FlowKey, ConnDistStats> connDist;
 };
 
-int main(int argc, char *argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+struct ProcessingContext {
+  std::unordered_map<std::string, ProtocolStats> protocolData;
+  uint64_t globalPacketIndex = 0;
+  uint64_t packetsProcessed = 0;
+};
 
-  std::string inputFile = FLAGS_input_file;
-  std::string outputCsvFile = FLAGS_output_csv;
+static void processPacket(pcpp::RawPacket &rawPacket, ProcessingContext &ctx) {
+  pcpp::Packet parsedPacket(&rawPacket);
+
+  const uint8_t *srcIPBytes = nullptr;
+  const uint8_t *dstIPBytes = nullptr;
+  bool isV6 = false;
+  const char *ipVerPrefix = "IPv4_";
+
+  pcpp::IPv4Address srcAddr4, dstAddr4;
+  pcpp::IPv6Address srcAddr6, dstAddr6;
+  FlowKey currentConnection;
+  UserKey currentUser;
+
+  // --- Layer 3: Network ---
+  if (parsedPacket.isPacketOfType(pcpp::IPv4)) {
+    auto *ipLayer = parsedPacket.getLayerOfType<pcpp::IPv4Layer>();
+    srcAddr4 = ipLayer->getSrcIPv4Address();
+    dstAddr4 = ipLayer->getDstIPv4Address();
+    srcIPBytes = srcAddr4.toBytes();
+    dstIPBytes = dstAddr4.toBytes();
+    isV6 = false;
+    ipVerPrefix = "IPv4_";
+  } else if (parsedPacket.isPacketOfType(pcpp::IPv6)) {
+    auto *ipLayer = parsedPacket.getLayerOfType<pcpp::IPv6Layer>();
+    srcAddr6 = ipLayer->getSrcIPv6Address();
+    dstAddr6 = ipLayer->getDstIPv6Address();
+    srcIPBytes = srcAddr6.toBytes();
+    dstIPBytes = dstAddr6.toBytes();
+    isV6 = true;
+    ipVerPrefix = "IPv6_";
+  } else {
+    return;
+  }
+
+  // --- Layer 4: Transport ---
+  uint16_t srcPort = 0;
+  uint16_t dstPort = 0;
+  std::string protocolName;
+
+  auto get_proto_name = [&](uint16_t s, uint16_t d, const char *ver,
+                            const std::string &type) {
+    uint16_t minPort = std::min(s, d);
+    std::string name = ver;
+    if (minPort == 443) {
+      name += (type == "TCP" ? "HTTPS/2" : "HTTPS/3");
+    } else {
+      name += "Unknown_" + type + "_" + std::to_string(minPort);
+    }
+    return name;
+  };
+
+  if (auto *tcpLayer = parsedPacket.getLayerOfType<pcpp::TcpLayer>()) {
+    srcPort = tcpLayer->getSrcPort();
+    dstPort = tcpLayer->getDstPort();
+    protocolName = get_proto_name(srcPort, dstPort, ipVerPrefix, "TCP");
+  } else if (auto *udpLayer = parsedPacket.getLayerOfType<pcpp::UdpLayer>()) {
+    srcPort = udpLayer->getSrcPort();
+    dstPort = udpLayer->getDstPort();
+    protocolName = get_proto_name(srcPort, dstPort, ipVerPrefix, "UDP");
+  } else {
+    return;
+  }
+
+  // --- Canonicalization ---
+  currentConnection.isIPv6 = isV6;
+  currentUser.isIPv6 = isV6;
+
+  // Compare IPs to decide order (canonical direction)
+  int cmp = std::memcmp(srcIPBytes, dstIPBytes, isV6 ? 16 : 4);
+
+  if (cmp < 0 || (cmp == 0 && srcPort > dstPort)) {
+    std::memcpy(currentConnection.ipA.data(), srcIPBytes, isV6 ? 16 : 4);
+    std::memcpy(currentConnection.ipB.data(), dstIPBytes, isV6 ? 16 : 4);
+    currentConnection.portA = srcPort;
+    currentConnection.portB = dstPort;
+  } else {
+    std::memcpy(currentConnection.ipA.data(), dstIPBytes, isV6 ? 16 : 4);
+    std::memcpy(currentConnection.ipB.data(), srcIPBytes, isV6 ? 16 : 4);
+    currentConnection.portA = dstPort;
+    currentConnection.portB = srcPort;
+  }
+  if (srcPort > dstPort) {
+    // Src is likely the Client (User)
+    std::memcpy(currentUser.ip.data(), srcIPBytes, isV6 ? 16 : 4);
+  } else {
+    // Dst is likely the Client (User)
+    std::memcpy(currentUser.ip.data(), dstIPBytes, isV6 ? 16 : 4);
+  }
+
+  // --- Stats Update ---
+  auto &stats = ctx.protocolData[protocolName];
+  stats.packetCount++;
+  stats.totalBytes += rawPacket.getRawDataLen();
+  stats.connections.insert(currentConnection);
+  stats.users.insert(currentUser);
+
+  ++ctx.globalPacketIndex;
+  ++ctx.packetsProcessed;
+  if (FLAGS_compute_packet_distance) {
+    auto &cd = stats.connDist[currentConnection];
+    if (cd.lastIdx != 0) {
+      cd.sum += (ctx.globalPacketIndex - cd.lastIdx);
+      cd.samples++;
+    }
+    cd.lastIdx = ctx.globalPacketIndex;
+  }
+}
+
+static int runFileReader(ProcessingContext &ctx) {
+  const std::string &inputFile = FLAGS_input_file;
 
   auto pcap_reader(pcpp::IFileReaderDevice::getReader(inputFile));
   if (pcap_reader == nullptr || !pcap_reader->open()) {
@@ -154,10 +276,6 @@ int main(int argc, char *argv[]) {
   }
 
   pcpp::RawPacket rawPacket;
-  std::unordered_map<std::string, ProtocolStats> protocol_data;
-  uint64_t globalPacketIndex = 0;
-
-  // Pre-allocate one key to reuse (avoid re-allocating on stack every loop)
 
   std::cout << "Processing pcap file..." << std::endl;
 
@@ -205,114 +323,148 @@ int main(int argc, char *argv[]) {
     ++packetsRead;
     if (packetsRead % progressEvery == 0)
       renderProgress(false);
-    pcpp::Packet parsedPacket(&rawPacket);
-
-    const uint8_t *srcIPBytes = nullptr;
-    const uint8_t *dstIPBytes = nullptr;
-    bool isV6 = false;
-    const char *ipVerPrefix = "IPv4_";
-
-    pcpp::IPv4Address srcAddr4, dstAddr4;
-    pcpp::IPv6Address srcAddr6, dstAddr6;
-    FlowKey currentConnection;
-    UserKey currentUser;
-
-    // --- Layer 3: Network ---
-    if (parsedPacket.isPacketOfType(pcpp::IPv4)) {
-      auto *ipLayer = parsedPacket.getLayerOfType<pcpp::IPv4Layer>();
-      srcAddr4 = ipLayer->getSrcIPv4Address();
-      dstAddr4 = ipLayer->getDstIPv4Address();
-      srcIPBytes = srcAddr4.toBytes();
-      dstIPBytes = dstAddr4.toBytes();
-      isV6 = false;
-      ipVerPrefix = "IPv4_";
-    } else if (parsedPacket.isPacketOfType(pcpp::IPv6)) {
-      auto *ipLayer = parsedPacket.getLayerOfType<pcpp::IPv6Layer>();
-      srcAddr6 = ipLayer->getSrcIPv6Address();
-      dstAddr6 = ipLayer->getDstIPv6Address();
-      srcIPBytes = srcAddr6.toBytes();
-      dstIPBytes = dstAddr6.toBytes();
-      isV6 = true;
-      ipVerPrefix = "IPv6_";
-    } else {
-      continue;
-    }
-
-    // --- Layer 4: Transport ---
-    uint16_t srcPort = 0;
-    uint16_t dstPort = 0;
-    std::string protocolName;
-
-    auto get_proto_name = [&](uint16_t s, uint16_t d, const char *ver,
-                              const std::string &type) {
-      uint16_t minPort = std::min(s, d);
-      std::string name = ver;
-      if (minPort == 443) {
-        name += (type == "TCP" ? "HTTPS/2" : "HTTPS/3");
-      } else {
-        name += "Unknown_" + type + "_" + std::to_string(minPort);
-      }
-      return name;
-    };
-
-    if (auto *tcpLayer = parsedPacket.getLayerOfType<pcpp::TcpLayer>()) {
-      srcPort = tcpLayer->getSrcPort();
-      dstPort = tcpLayer->getDstPort();
-      protocolName = get_proto_name(srcPort, dstPort, ipVerPrefix, "TCP");
-    } else if (auto *udpLayer = parsedPacket.getLayerOfType<pcpp::UdpLayer>()) {
-      srcPort = udpLayer->getSrcPort();
-      dstPort = udpLayer->getDstPort();
-      protocolName = get_proto_name(srcPort, dstPort, ipVerPrefix, "UDP");
-    } else {
-      continue;
-    }
-
-    // --- Canonicalization ---
-    currentConnection.isIPv6 = isV6;
-    currentUser.isIPv6 = isV6;
-
-    // Compare IPs to decide order (canonical direction)
-    int cmp = std::memcmp(srcIPBytes, dstIPBytes, isV6 ? 16 : 4);
-
-    if (cmp < 0 || (cmp == 0 && srcPort > dstPort)) {
-      std::memcpy(currentConnection.ipA.data(), srcIPBytes, isV6 ? 16 : 4);
-      std::memcpy(currentConnection.ipB.data(), dstIPBytes, isV6 ? 16 : 4);
-      currentConnection.portA = srcPort;
-      currentConnection.portB = dstPort;
-    } else {
-      std::memcpy(currentConnection.ipA.data(), dstIPBytes, isV6 ? 16 : 4);
-      std::memcpy(currentConnection.ipB.data(), srcIPBytes, isV6 ? 16 : 4);
-      currentConnection.portA = dstPort;
-      currentConnection.portB = srcPort;
-    }
-    if (srcPort > dstPort) {
-      // Src is likely the Client (User)
-      std::memcpy(currentUser.ip.data(), srcIPBytes, isV6 ? 16 : 4);
-    } else {
-      // Dst is likely the Client (User)
-      std::memcpy(currentUser.ip.data(), dstIPBytes, isV6 ? 16 : 4);
-    }
-
-    // --- Stats Update ---
-    auto &stats = protocol_data[protocolName];
-    stats.packetCount++;
-    stats.totalBytes += rawPacket.getRawDataLen();
-    stats.connections.insert(currentConnection);
-    stats.users.insert(currentUser);
-
-    ++globalPacketIndex;
-    if (FLAGS_compute_packet_distance) {
-      auto &cd = stats.connDist[currentConnection];
-      if (cd.lastIdx != 0) {
-        cd.sum += (globalPacketIndex - cd.lastIdx);
-        cd.samples++;
-      }
-      cd.lastIdx = globalPacketIndex;
-    }
+    processPacket(rawPacket, ctx);
   }
 
   renderProgress(true);
   pcap_reader->close();
+  return 0;
+}
+
+#ifdef USE_DPDK
+namespace {
+std::atomic<bool> g_stop{false};
+void onSigint(int /*sig*/) { g_stop.store(true); }
+
+void onDpdkPacketsArrive(pcpp::MBufRawPacket **packets, uint32_t numOfPackets,
+                         uint8_t /*threadId*/, pcpp::DpdkDevice * /*device*/,
+                         void *userCookie) {
+  auto *ctx = static_cast<ProcessingContext *>(userCookie);
+  for (uint32_t i = 0; i < numOfPackets; ++i) {
+    processPacket(*packets[i], *ctx);
+  }
+  if (FLAGS_max_packets > 0 && ctx->packetsProcessed >= FLAGS_max_packets)
+    g_stop.store(true);
+}
+
+// Tokenize a space-separated EAL-args string. Extracts "-c <hex>" (and
+// "-c<hex>") into `coreMaskOut` and leaves every other token in `argvOut`.
+// Storage for argv C-strings lives in `storage`, which must outlive the argv.
+uint64_t extractCoreMask(const std::string &raw, std::vector<std::string> &storage,
+                         std::vector<char *> &argvOut) {
+  uint64_t coreMask = 0;
+  bool haveMask = false;
+  std::istringstream iss(raw);
+  std::string tok;
+  while (iss >> tok) {
+    if (tok == "-c") {
+      std::string next;
+      if (!(iss >> next)) {
+        std::cerr << "--dpdk_eal_args: \"-c\" needs an argument\n";
+        std::exit(1);
+      }
+      coreMask = std::stoull(next, nullptr, 0);
+      haveMask = true;
+      continue;
+    }
+    if (tok.rfind("-c", 0) == 0 && tok.size() > 2) {
+      coreMask = std::stoull(tok.substr(2), nullptr, 0);
+      haveMask = true;
+      continue;
+    }
+    if (tok == "-l" || tok.rfind("-l", 0) == 0) {
+      std::cerr << "--dpdk_eal_args: core-list (\"-l ...\") not supported; "
+                   "use \"-c <hex_mask>\"\n";
+      std::exit(1);
+    }
+    storage.push_back(std::move(tok));
+  }
+  for (auto &s : storage)
+    argvOut.push_back(&s[0]);
+  if (!haveMask) {
+    std::cerr << "--dpdk_eal_args must specify cores via \"-c <hex_mask>\"\n";
+    std::exit(1);
+  }
+  return coreMask;
+}
+
+int runDpdkCapture(ProcessingContext &ctx) {
+  std::vector<std::string> ealStorage;
+  std::vector<char *> ealArgv;
+  pcpp::CoreMask coreMask =
+      extractCoreMask(FLAGS_dpdk_eal_args, ealStorage, ealArgv);
+
+  if (!pcpp::DpdkDeviceList::initDpdk(
+          coreMask, static_cast<uint32_t>(FLAGS_dpdk_mbuf_pool_size),
+          /*mBufDataSize*/ 0, /*masterCore*/ 0,
+          static_cast<uint32_t>(ealArgv.size()),
+          ealArgv.empty() ? nullptr : ealArgv.data(),
+          /*appName*/ "trace_analyser")) {
+    std::cerr << "DPDK EAL init failed" << std::endl;
+    return 1;
+  }
+
+  auto *dev =
+      pcpp::DpdkDeviceList::getInstance().getDeviceByPort(FLAGS_dpdk_port);
+  if (dev == nullptr) {
+    std::cerr << "No DPDK device found for port " << FLAGS_dpdk_port
+              << std::endl;
+    return 1;
+  }
+  if (!dev->open()) {
+    std::cerr << "Cannot open DPDK port " << FLAGS_dpdk_port << std::endl;
+    return 1;
+  }
+
+  std::signal(SIGINT, onSigint);
+
+  if (!dev->startCaptureSingleThread(onDpdkPacketsArrive, &ctx)) {
+    std::cerr << "DPDK startCaptureSingleThread failed" << std::endl;
+    dev->close();
+    return 1;
+  }
+
+  std::cout << "Capturing from DPDK port " << FLAGS_dpdk_port
+            << " (Ctrl-C to stop)" << std::endl;
+
+  const auto start = std::chrono::steady_clock::now();
+  while (!g_stop.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (FLAGS_duration_sec > 0 &&
+        std::chrono::steady_clock::now() - start >=
+            std::chrono::seconds(FLAGS_duration_sec))
+      break;
+  }
+
+  dev->stopCapture();
+  dev->close();
+  std::cerr << "Captured " << ctx.packetsProcessed << " packets" << std::endl;
+  return 0;
+}
+} // namespace
+#endif // USE_DPDK
+
+int main(int argc, char *argv[]) {
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+  std::string outputCsvFile = FLAGS_output_csv;
+
+  ProcessingContext ctx;
+
+  if (FLAGS_dpdk_port >= 0) {
+#ifdef USE_DPDK
+    if (runDpdkCapture(ctx) != 0)
+      return 1;
+#else
+    std::cerr << "Built without DPDK support. Rebuild PcapPlusPlus with "
+                 "PCAPPP_USE_DPDK=ON and reconfigure this project."
+              << std::endl;
+    return 1;
+#endif
+  } else {
+    if (runFileReader(ctx) != 0)
+      return 1;
+  }
 
   // --- Post-Processing: Calculate Grand Totals ---
   uint64_t grandTotalBytes = 0;
@@ -320,7 +472,7 @@ int main(int argc, char *argv[]) {
   uint64_t grandTotalConnections = 0;
   uint64_t grandTotalUsers = 0;
 
-  for (const auto &kv : protocol_data) {
+  for (const auto &kv : ctx.protocolData) {
     grandTotalBytes += kv.second.totalBytes;
     grandTotalPackets += kv.second.packetCount;
     grandTotalConnections += kv.second.connections.size();
@@ -329,7 +481,7 @@ int main(int argc, char *argv[]) {
 
   // Sort Results (Sorting by Volume)
   std::vector<std::pair<std::string, ProtocolStats>> sorted_results(
-      protocol_data.begin(), protocol_data.end());
+      ctx.protocolData.begin(), ctx.protocolData.end());
   std::sort(sorted_results.begin(), sorted_results.end(),
             [](const auto &a, const auto &b) {
               return a.second.totalBytes > b.second.totalBytes;
