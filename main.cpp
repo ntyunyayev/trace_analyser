@@ -1,270 +1,24 @@
+#include "core_types.h"
+#include "dpdk_backend.h"
 #include "helper.h"
+#include "processing.h"
+
 #include <algorithm>
-#include <array>
 #include <cstdio>
-#include <cstring>
+#include <cstdint>
 #include <fstream>
-#include <functional> // Required for std::hash
-#include <gflags/gflags.h>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
+#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <unordered_map>
-#include <unordered_set>
+#include <utility>
 #include <vector>
 
-#include <pcapplusplus/IPv4Layer.h>
-#include <pcapplusplus/IPv6Layer.h>
-#include <pcapplusplus/Packet.h>
+#include <gflags/gflags.h>
+#include <pcapplusplus/IpAddress.h>
 #include <pcapplusplus/PcapFileDevice.h>
-#include <pcapplusplus/TcpLayer.h>
-#include <pcapplusplus/UdpLayer.h>
-
-#ifdef USE_DPDK
-#include <atomic>
-#include <chrono>
-#include <csignal>
-#include <pcapplusplus/DpdkDevice.h>
-#include <pcapplusplus/DpdkDeviceList.h>
-#include <pcapplusplus/MBufRawPacket.h>
-#include <thread>
-#endif
-
-// --- 1. The Key Struct ---
-struct alignas(8) FlowKey {
-  std::array<uint8_t, 16> ipA;
-  std::array<uint8_t, 16> ipB;
-  uint16_t portA;
-  uint16_t portB;
-  bool isIPv6;
-
-  // 3 bytes of invisible padding are added here automatically by alignas(8)
-
-  FlowKey() { std::memset(this, 0, sizeof(FlowKey)); }
-
-  bool operator==(const FlowKey &other) const {
-    return std::memcmp(this, &other, sizeof(FlowKey)) == 0;
-  }
-};
-// --- 1. The Key Struct ---
-struct alignas(8) UserKey {
-  std::array<uint8_t, 16> ip;
-  bool isIPv6;
-
-  // 3 bytes of invisible padding are added here automatically by alignas(8)
-
-  UserKey() { std::memset(this, 0, sizeof(UserKey)); }
-
-  bool operator==(const UserKey &other) const {
-    return std::memcmp(this, &other, sizeof(UserKey)) == 0;
-  }
-};
-// --- 2. Standard Hash Specialization ---
-// This allows you to use std::unordered_set<FlowKey> directly.
-// 2. High-Performance Block Hash
-namespace std {
-template <> struct hash<UserKey> {
-  std::size_t operator()(const UserKey &k) const {
-    // We read the struct as 3 chunks of 64-bit integers.
-    // Using memcpy is the "Strict Aliasing Safe" way to do this.
-    // The compiler optimizes this memcpy away completely into register loads.
-
-    uint64_t buffer[3];
-    std::memcpy(buffer, &k, sizeof(UserKey)); // Copy 24 bytes
-
-    // MurmurHash3-style mixing constants
-    uint64_t h = 0;
-    const uint64_t kMul = 0x9ddfea08eb382d69ULL;
-
-    // Unrolled loop for the 3 blocks
-    auto mix = [&](uint64_t block) {
-      block *= kMul;
-      block ^= (block >> 47);
-      block *= kMul;
-      h ^= block;
-      h *= kMul;
-    };
-
-    mix(buffer[0]);
-    mix(buffer[1]);
-    mix(buffer[2]);
-
-    // Final avalanche
-    h ^= (h >> 47);
-    h *= kMul;
-    h ^= (h >> 47);
-
-    return static_cast<size_t>(h);
-  }
-};
-
-template <> struct hash<FlowKey> {
-  std::size_t operator()(const FlowKey &k) const {
-    // We read the struct as 5 chunks of 64-bit integers.
-    // Using memcpy is the "Strict Aliasing Safe" way to do this.
-    // The compiler optimizes this memcpy away completely into register loads.
-
-    uint64_t buffer[5];
-    std::memcpy(buffer, &k, sizeof(FlowKey)); // Copy 40 bytes
-
-    // MurmurHash3-style mixing constants
-    uint64_t h = 0;
-    const uint64_t kMul = 0x9ddfea08eb382d69ULL;
-
-    // Unrolled loop for the 5 blocks
-    auto mix = [&](uint64_t block) {
-      block *= kMul;
-      block ^= (block >> 47);
-      block *= kMul;
-      h ^= block;
-      h *= kMul;
-    };
-
-    mix(buffer[0]); // IP A (first half)
-    mix(buffer[1]); // IP A (second half)
-    mix(buffer[2]); // IP B (first half)
-    mix(buffer[3]); // IP B (second half)
-    mix(buffer[4]); // Ports + Bool + Padding
-
-    // Final avalanche
-    h ^= (h >> 47);
-    h *= kMul;
-    h ^= (h >> 47);
-
-    return static_cast<size_t>(h);
-  }
-};
-} // namespace std
-struct ConnDistStats {
-  uint64_t lastIdx = 0;
-  uint64_t sum = 0;
-  uint64_t samples = 0;
-};
-
-struct ProtocolStats {
-  uint64_t packetCount = 0;
-  uint64_t totalBytes = 0;
-  std::unordered_set<FlowKey>
-      connections;                   // Uses std::hash<FlowKey> automatically
-  std::unordered_set<UserKey> users; // Uses std::hash<UserKey> automatically
-  std::unordered_map<FlowKey, ConnDistStats> connDist;
-};
-
-struct ProcessingContext {
-  std::unordered_map<std::string, ProtocolStats> protocolData;
-  uint64_t globalPacketIndex = 0;
-  uint64_t packetsProcessed = 0;
-};
-
-static void processPacket(pcpp::RawPacket &rawPacket, ProcessingContext &ctx) {
-  pcpp::Packet parsedPacket(&rawPacket);
-
-  const uint8_t *srcIPBytes = nullptr;
-  const uint8_t *dstIPBytes = nullptr;
-  bool isV6 = false;
-  const char *ipVerPrefix = "IPv4_";
-
-  pcpp::IPv4Address srcAddr4, dstAddr4;
-  pcpp::IPv6Address srcAddr6, dstAddr6;
-  FlowKey currentConnection;
-  UserKey currentUser;
-
-  // --- Layer 3: Network ---
-  if (parsedPacket.isPacketOfType(pcpp::IPv4)) {
-    auto *ipLayer = parsedPacket.getLayerOfType<pcpp::IPv4Layer>();
-    srcAddr4 = ipLayer->getSrcIPv4Address();
-    dstAddr4 = ipLayer->getDstIPv4Address();
-    srcIPBytes = srcAddr4.toBytes();
-    dstIPBytes = dstAddr4.toBytes();
-    isV6 = false;
-    ipVerPrefix = "IPv4_";
-  } else if (parsedPacket.isPacketOfType(pcpp::IPv6)) {
-    auto *ipLayer = parsedPacket.getLayerOfType<pcpp::IPv6Layer>();
-    srcAddr6 = ipLayer->getSrcIPv6Address();
-    dstAddr6 = ipLayer->getDstIPv6Address();
-    srcIPBytes = srcAddr6.toBytes();
-    dstIPBytes = dstAddr6.toBytes();
-    isV6 = true;
-    ipVerPrefix = "IPv6_";
-  } else {
-    return;
-  }
-
-  // --- Layer 4: Transport ---
-  uint16_t srcPort = 0;
-  uint16_t dstPort = 0;
-  std::string protocolName;
-
-  auto get_proto_name = [&](uint16_t s, uint16_t d, const char *ver,
-                            const std::string &type) {
-    uint16_t minPort = std::min(s, d);
-    std::string name = ver;
-    if (minPort == 443) {
-      name += (type == "TCP" ? "HTTPS/2" : "HTTPS/3");
-    } else {
-      name += "Unknown_" + type + "_" + std::to_string(minPort);
-    }
-    return name;
-  };
-
-  if (auto *tcpLayer = parsedPacket.getLayerOfType<pcpp::TcpLayer>()) {
-    srcPort = tcpLayer->getSrcPort();
-    dstPort = tcpLayer->getDstPort();
-    protocolName = get_proto_name(srcPort, dstPort, ipVerPrefix, "TCP");
-  } else if (auto *udpLayer = parsedPacket.getLayerOfType<pcpp::UdpLayer>()) {
-    srcPort = udpLayer->getSrcPort();
-    dstPort = udpLayer->getDstPort();
-    protocolName = get_proto_name(srcPort, dstPort, ipVerPrefix, "UDP");
-  } else {
-    return;
-  }
-
-  // --- Canonicalization ---
-  currentConnection.isIPv6 = isV6;
-  currentUser.isIPv6 = isV6;
-
-  // Compare IPs to decide order (canonical direction)
-  int cmp = std::memcmp(srcIPBytes, dstIPBytes, isV6 ? 16 : 4);
-
-  if (cmp < 0 || (cmp == 0 && srcPort > dstPort)) {
-    std::memcpy(currentConnection.ipA.data(), srcIPBytes, isV6 ? 16 : 4);
-    std::memcpy(currentConnection.ipB.data(), dstIPBytes, isV6 ? 16 : 4);
-    currentConnection.portA = srcPort;
-    currentConnection.portB = dstPort;
-  } else {
-    std::memcpy(currentConnection.ipA.data(), dstIPBytes, isV6 ? 16 : 4);
-    std::memcpy(currentConnection.ipB.data(), srcIPBytes, isV6 ? 16 : 4);
-    currentConnection.portA = dstPort;
-    currentConnection.portB = srcPort;
-  }
-  if (srcPort > dstPort) {
-    // Src is likely the Client (User)
-    std::memcpy(currentUser.ip.data(), srcIPBytes, isV6 ? 16 : 4);
-  } else {
-    // Dst is likely the Client (User)
-    std::memcpy(currentUser.ip.data(), dstIPBytes, isV6 ? 16 : 4);
-  }
-
-  // --- Stats Update ---
-  auto &stats = ctx.protocolData[protocolName];
-  stats.packetCount++;
-  stats.totalBytes += rawPacket.getRawDataLen();
-  stats.connections.insert(currentConnection);
-  stats.users.insert(currentUser);
-
-  ++ctx.globalPacketIndex;
-  ++ctx.packetsProcessed;
-  if (FLAGS_compute_packet_distance) {
-    auto &cd = stats.connDist[currentConnection];
-    if (cd.lastIdx != 0) {
-      cd.sum += (ctx.globalPacketIndex - cd.lastIdx);
-      cd.samples++;
-    }
-    cd.lastIdx = ctx.globalPacketIndex;
-  }
-}
+#include <pcapplusplus/RawPacket.h>
 
 static int runFileReader(ProcessingContext &ctx) {
   const std::string &inputFile = FLAGS_input_file;
@@ -331,136 +85,16 @@ static int runFileReader(ProcessingContext &ctx) {
   return 0;
 }
 
-#ifdef USE_DPDK
-namespace {
-std::atomic<bool> g_stop{false};
-void onSigint(int /*sig*/) { g_stop.store(true); }
-
-void onDpdkPacketsArrive(pcpp::MBufRawPacket **packets, uint32_t numOfPackets,
-                         uint8_t /*threadId*/, pcpp::DpdkDevice * /*device*/,
-                         void *userCookie) {
-  auto *ctx = static_cast<ProcessingContext *>(userCookie);
-  for (uint32_t i = 0; i < numOfPackets; ++i) {
-    processPacket(*packets[i], *ctx);
-  }
-  if (FLAGS_max_packets > 0 && ctx->packetsProcessed >= FLAGS_max_packets)
-    g_stop.store(true);
-}
-
-// Tokenize a space-separated EAL-args string. Extracts "-c <hex>" (and
-// "-c<hex>") into `coreMaskOut` and leaves every other token in `argvOut`.
-// Storage for argv C-strings lives in `storage`, which must outlive the argv.
-uint64_t extractCoreMask(const std::string &raw, std::vector<std::string> &storage,
-                         std::vector<char *> &argvOut) {
-  uint64_t coreMask = 0;
-  bool haveMask = false;
-  std::istringstream iss(raw);
-  std::string tok;
-  while (iss >> tok) {
-    if (tok == "-c") {
-      std::string next;
-      if (!(iss >> next)) {
-        std::cerr << "--dpdk_eal_args: \"-c\" needs an argument\n";
-        std::exit(1);
-      }
-      coreMask = std::stoull(next, nullptr, 0);
-      haveMask = true;
-      continue;
-    }
-    if (tok.rfind("-c", 0) == 0 && tok.size() > 2) {
-      coreMask = std::stoull(tok.substr(2), nullptr, 0);
-      haveMask = true;
-      continue;
-    }
-    if (tok == "-l" || tok.rfind("-l", 0) == 0) {
-      std::cerr << "--dpdk_eal_args: core-list (\"-l ...\") not supported; "
-                   "use \"-c <hex_mask>\"\n";
-      std::exit(1);
-    }
-    storage.push_back(std::move(tok));
-  }
-  for (auto &s : storage)
-    argvOut.push_back(&s[0]);
-  if (!haveMask) {
-    std::cerr << "--dpdk_eal_args must specify cores via \"-c <hex_mask>\"\n";
-    std::exit(1);
-  }
-  return coreMask;
-}
-
-int runDpdkCapture(ProcessingContext &ctx) {
-  std::vector<std::string> ealStorage;
-  std::vector<char *> ealArgv;
-  pcpp::CoreMask coreMask =
-      extractCoreMask(FLAGS_dpdk_eal_args, ealStorage, ealArgv);
-
-  if (!pcpp::DpdkDeviceList::initDpdk(
-          coreMask, static_cast<uint32_t>(FLAGS_dpdk_mbuf_pool_size),
-          /*mBufDataSize*/ 0, /*masterCore*/ 0,
-          static_cast<uint32_t>(ealArgv.size()),
-          ealArgv.empty() ? nullptr : ealArgv.data(),
-          /*appName*/ "trace_analyser")) {
-    std::cerr << "DPDK EAL init failed" << std::endl;
-    return 1;
-  }
-
-  auto *dev =
-      pcpp::DpdkDeviceList::getInstance().getDeviceByPort(FLAGS_dpdk_port);
-  if (dev == nullptr) {
-    std::cerr << "No DPDK device found for port " << FLAGS_dpdk_port
-              << std::endl;
-    return 1;
-  }
-  if (!dev->open()) {
-    std::cerr << "Cannot open DPDK port " << FLAGS_dpdk_port << std::endl;
-    return 1;
-  }
-
-  std::signal(SIGINT, onSigint);
-
-  if (!dev->startCaptureSingleThread(onDpdkPacketsArrive, &ctx)) {
-    std::cerr << "DPDK startCaptureSingleThread failed" << std::endl;
-    dev->close();
-    return 1;
-  }
-
-  std::cout << "Capturing from DPDK port " << FLAGS_dpdk_port
-            << " (Ctrl-C to stop)" << std::endl;
-
-  const auto start = std::chrono::steady_clock::now();
-  while (!g_stop.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    if (FLAGS_duration_sec > 0 &&
-        std::chrono::steady_clock::now() - start >=
-            std::chrono::seconds(FLAGS_duration_sec))
-      break;
-  }
-
-  dev->stopCapture();
-  dev->close();
-  std::cerr << "Captured " << ctx.packetsProcessed << " packets" << std::endl;
-  return 0;
-}
-} // namespace
-#endif // USE_DPDK
-
 int main(int argc, char *argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  std::string outputCsvFile = FLAGS_output_csv;
+  const std::string outputCsvFile = FLAGS_output_csv;
 
   ProcessingContext ctx;
 
   if (FLAGS_dpdk_port >= 0) {
-#ifdef USE_DPDK
-    if (runDpdkCapture(ctx) != 0)
+    if (run_dpdk_capture(ctx) != 0)
       return 1;
-#else
-    std::cerr << "Built without DPDK support. Rebuild PcapPlusPlus with "
-                 "PCAPPP_USE_DPDK=ON and reconfigure this project."
-              << std::endl;
-    return 1;
-#endif
   } else {
     if (runFileReader(ctx) != 0)
       return 1;
@@ -600,6 +234,23 @@ int main(int argc, char *argv[]) {
               << FLAGS_output_connections_csv << std::endl;
   }
 
+  if (FLAGS_compute_header_sizes && !FLAGS_output_header_sizes_csv.empty()) {
+    std::ofstream hdrCsv(FLAGS_output_header_sizes_csv);
+    if (!hdrCsv.is_open()) {
+      std::cerr << "Error writing header-sizes CSV." << std::endl;
+      return 1;
+    }
+    hdrCsv << "Protocol,Header,Size_Bytes,Count\n";
+    for (const auto &item : sorted_results) {
+      for (const auto &kv : item.second.ipHeaderSizes)
+        hdrCsv << item.first << ",IP," << kv.first << "," << kv.second << "\n";
+      for (const auto &kv : item.second.tcpHeaderSizes)
+        hdrCsv << item.first << ",TCP," << kv.first << "," << kv.second << "\n";
+    }
+    hdrCsv.close();
+    std::cout << "Header-sizes CSV written to "
+              << FLAGS_output_header_sizes_csv << std::endl;
+  }
+
   return 0;
 }
-
