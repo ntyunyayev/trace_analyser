@@ -12,6 +12,31 @@ The tool provides for each protocol, the total number of packets, bytes and conn
 - (optional, for the DPDK backend) DPDK, and a PcapPlusPlus build that
   includes DPDK support — see below.
 
+### Installing gflags
+
+The analyser dynamically links `libgflags.so`. If the binary is moved to a
+machine that doesn't have it, you'll see:
+
+    ./analyser-nodpdk: error while loading shared libraries:
+    libgflags.so.2.2: cannot open shared object file: No such file or directory
+
+Install via the system package manager:
+
+    # Debian / Ubuntu
+    sudo apt install libgflags2.2 libgflags-dev
+
+    # RHEL / Fedora / CentOS
+    sudo dnf install gflags gflags-devel
+
+    # From source (any distro):
+    git clone https://github.com/gflags/gflags.git
+    cmake -S gflags -B gflags/build -DBUILD_SHARED_LIBS=ON
+    cmake --build gflags/build -j$(nproc)
+    sudo cmake --install gflags/build
+
+(`-dev`/`-devel` package is needed at build time; the runtime-only `.so` is
+sufficient on hosts that just run a pre-built binary.)
+
 ## Building PcapPlusPlus with DPDK support
 
 The DPDK backend in this project compiles only when the installed PcapPlusPlus
