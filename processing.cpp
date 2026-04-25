@@ -122,7 +122,44 @@ static void updateStats(ProcessingContext &ctx, const L3Info &l3, const L4Info &
     }
 }
 
+// Returns true iff the buffer is long enough that pcpp::Packet can safely walk
+// Ethernet + IPv4/IPv6 + TCP/UDP without reading past the end. Catches the
+// truncation-by-capture case (snaplen-shorter-than-headers), where pcpp
+// otherwise follows length fields off the buffer and segfaults.
+static bool hasL2L3L4Headroom(const pcpp::RawPacket &rp) {
+    const uint8_t *d = rp.getRawData();
+    const int len = rp.getRawDataLen();
+    if (len < 14)
+        return false;
+
+    int l2End = 14;
+    uint16_t etherType = (static_cast<uint16_t>(d[12]) << 8) | d[13];
+    // Strip one 802.1Q VLAN tag if present.
+    if (etherType == 0x8100 && len >= 18) {
+        etherType = (static_cast<uint16_t>(d[16]) << 8) | d[17];
+        l2End = 18;
+    }
+
+    if (etherType == 0x0800) { // IPv4
+        if (len < l2End + 20)
+            return false;
+        const uint8_t proto = d[l2End + 9];
+        const int l4Min = (proto == 6 /*TCP*/) ? 20 : 8;
+        return len >= l2End + 20 + l4Min;
+    }
+    if (etherType == 0x86DD) { // IPv6
+        if (len < l2End + 40)
+            return false;
+        const uint8_t proto = d[l2End + 6];
+        const int l4Min = (proto == 6 /*TCP*/) ? 20 : 8;
+        return len >= l2End + 40 + l4Min;
+    }
+    return false; // not IP; processPacket would skip it anyway
+}
+
 void processPacket(pcpp::RawPacket &rawPacket, ProcessingContext &ctx) {
+    if (!hasL2L3L4Headroom(rawPacket))
+        return;
     pcpp::Packet parsedPacket(&rawPacket);
 
     L3Info l3;
