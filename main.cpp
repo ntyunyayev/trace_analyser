@@ -17,6 +17,7 @@
 
 #include <gflags/gflags.h>
 #include <pcapplusplus/IpAddress.h>
+#include <pcapplusplus/Logger.h>
 #include <pcapplusplus/PcapFileDevice.h>
 #include <pcapplusplus/RawPacket.h>
 
@@ -86,6 +87,13 @@ static int runFileReader(ProcessingContext &ctx) {
 
 int main(int argc, char *argv[]) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+    // Silence pcpp's DnsLayer parser errors. We don't consume the DNS layer,
+    // but pcpp's Packet ctor auto-parses every UDP/53 payload and logs an
+    // error per malformed-looking name pointer — at line rate that's pure
+    // overhead. Set to Off to short-circuit at the cheap shouldLog() check.
+    pcpp::Logger::getInstance().setLogLevel(pcpp::PacketLogModuleDnsLayer,
+                                            pcpp::LogLevel::Off);
 
     const std::string outputCsvFile = FLAGS_output_csv;
 
