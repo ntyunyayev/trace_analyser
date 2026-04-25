@@ -17,3 +17,5 @@ DECLARE_string(dpdk_eal_args);
 
 DECLARE_int32(duration_sec);
 DECLARE_uint64(max_packets);
+
+DECLARE_int32(dpdk_stats_interval_sec);

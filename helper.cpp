@@ -34,3 +34,8 @@ DEFINE_string(dpdk_eal_args, "-c 0x3",
 DEFINE_int32(duration_sec, 0, "Stop capture after N seconds (0 = no limit)");
 
 DEFINE_uint64(max_packets, 0, "Stop capture after N packets (0 = no limit)");
+
+DEFINE_int32(dpdk_stats_interval_sec, 1,
+             "DPDK NIC stats sample interval in seconds (rxPackets, drops, "
+             "mbuf failures). 0 disables periodic logging; a final summary is "
+             "always printed at stop.");

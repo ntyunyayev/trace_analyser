@@ -110,6 +110,14 @@ uint64_t totalProcessed(const DpdkSharedState &shared) {
     return total;
 }
 
+void printDpdkStats(const std::string &tag, const pcpp::DpdkDevice::DpdkDeviceStats &stats) {
+    std::cerr << "[dpdk-stats " << tag << "] rx=" << stats.aggregatedRxStats.packets
+              << " bytes=" << stats.aggregatedRxStats.bytes
+              << " dropped(HW)=" << stats.rxPacketsDroppedByHW
+              << " erroneous=" << stats.rxErroneousPackets
+              << " mbuf_alloc_fail=" << stats.rxMbufAlocFailed << std::endl;
+}
+
 } // namespace
 
 int run_dpdk_capture(ProcessingContext &ctx) {
@@ -168,16 +176,29 @@ int run_dpdk_capture(ProcessingContext &ctx) {
               << (numWorkers <= 1 ? 1 : numWorkers) << " worker(s) (Ctrl-C to stop)" << std::endl;
 
     const auto start = std::chrono::steady_clock::now();
+    auto lastStatsAt = start;
     while (!g_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        if (FLAGS_duration_sec > 0 &&
-            std::chrono::steady_clock::now() - start >= std::chrono::seconds(FLAGS_duration_sec))
+        const auto now = std::chrono::steady_clock::now();
+        if (FLAGS_duration_sec > 0 && now - start >= std::chrono::seconds(FLAGS_duration_sec))
             break;
         if (FLAGS_max_packets > 0 && totalProcessed(shared) >= FLAGS_max_packets)
             break;
+        if (FLAGS_dpdk_stats_interval_sec > 0 &&
+            now - lastStatsAt >= std::chrono::seconds(FLAGS_dpdk_stats_interval_sec)) {
+            pcpp::DpdkDevice::DpdkDeviceStats stats{};
+            dev->getStatistics(stats);
+            printDpdkStats("periodic", stats);
+            lastStatsAt = now;
+        }
     }
 
     dev->stopCapture();
+
+    pcpp::DpdkDevice::DpdkDeviceStats finalStats{};
+    dev->getStatistics(finalStats);
+    printDpdkStats("final", finalStats);
+
     dev->close();
 
     for (const auto &c : shared.contexts) {
@@ -186,6 +207,8 @@ int run_dpdk_capture(ProcessingContext &ctx) {
         mergeInto(ctx, c);
     }
 
-    std::cerr << "Captured " << ctx.packetsProcessed << " packets" << std::endl;
+    std::cerr << "Captured " << ctx.packetsProcessed << " packets ("
+              << finalStats.rxPacketsDroppedByHW << " dropped by NIC, "
+              << finalStats.rxMbufAlocFailed << " mbuf alloc failures)" << std::endl;
     return 0;
 }
