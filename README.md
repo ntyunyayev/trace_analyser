@@ -83,13 +83,20 @@ and `./build.sh dpdk` here will print
 
 ## Building
 
-    ./build.sh           # auto-detect DPDK
-    ./build.sh dpdk      # require DPDK (configure-time error if pcpp lacks it)
-    ./build.sh nodpdk    # build without DPDK
-    ./build.sh clean
+    ./build.sh           # auto-detect DPDK     -> ./analyser
+    ./build.sh dpdk      # require DPDK         -> ./analyser
+    ./build.sh nodpdk    # build without DPDK   -> ./analyser
+    ./build.sh both      # build both flavours  -> ./analyser-dpdk + ./analyser-nodpdk
+    ./build.sh clean     # rm -rf build build-dpdk build-nodpdk
 
 Equivalent direct CMake invocation:
 `cmake -S . -B build -DWITH_DPDK=AUTO|ON|OFF && cmake --build build`.
+The output binary name can be overridden with `-DANALYSER_NAME=<name>`.
+
+`./build.sh both` is the easy way to keep a DPDK and a non-DPDK binary side
+by side — useful for benchmarking the offline-only path against the DPDK
+build, or for shipping the no-DPDK variant to machines that don't have DPDK
+in their `LD_LIBRARY_PATH`.
 
 ## Flags
 

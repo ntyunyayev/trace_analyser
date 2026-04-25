@@ -9,13 +9,17 @@ set(CMAKE_CXX_EXTENSIONS ON)
 find_package(gflags REQUIRED)
 find_package(PcapPlusPlus REQUIRED)
 
+set(ANALYSER_NAME "analyser" CACHE STRING "Output name of the analyser binary")
+
 add_executable("analyser"
   main.cpp
   helper.cpp
   processing.cpp
 )
 target_link_libraries("analyser" PUBLIC PcapPlusPlus::Pcap++ gflags)
-set_target_properties("analyser" PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+set_target_properties("analyser" PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  OUTPUT_NAME "${ANALYSER_NAME}")
 
 # DPDK backend selection.
 #   -DWITH_DPDK=AUTO (default): enable iff PcapPlusPlus has DpdkDevice.h

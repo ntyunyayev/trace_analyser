@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
 # Usage:
-#   ./build.sh           # auto-detect DPDK (default)
-#   ./build.sh dpdk      # require DPDK; fail if pcpp lacks it
-#   ./build.sh nodpdk    # build without DPDK
-#   ./build.sh clean     # rm -rf build/
+#   ./build.sh           # auto-detect DPDK (default)        -> ./analyser
+#   ./build.sh dpdk      # require DPDK; fail if pcpp lacks  -> ./analyser
+#   ./build.sh nodpdk    # build without DPDK                -> ./analyser
+#   ./build.sh both      # build both flavours side-by-side  -> ./analyser-dpdk + ./analyser-nodpdk
+#   ./build.sh clean     # rm -rf build*
 #
-# Forwards to CMake via -DWITH_DPDK=AUTO|ON|OFF.
+# Forwards to CMake via -DWITH_DPDK=AUTO|ON|OFF and (for `both`)
+# -DANALYSER_NAME=analyser-{dpdk,nodpdk} into separate build dirs.
 
 set -euo pipefail
 
-BUILD_DIR=build
 mode=${1:-auto}
 
-case "$mode" in
-  auto)    with_dpdk=AUTO ;;
-  dpdk)    with_dpdk=ON ;;
-  nodpdk)  with_dpdk=OFF ;;
-  clean)   rm -rf "$BUILD_DIR"; exit 0 ;;
-  -h|--help|help)
-    sed -n '2,7p' "$0"; exit 0 ;;
-  *)
-    echo "unknown mode '$mode' (try: auto | dpdk | nodpdk | clean)" >&2
-    exit 2 ;;
-esac
+build_one() {
+    local with_dpdk=$1 build_dir=$2 binary_name=$3
+    cmake -S . -B "$build_dir" -DWITH_DPDK="$with_dpdk" -DANALYSER_NAME="$binary_name"
+    cmake --build "$build_dir"
+}
 
-cmake -S . -B "$BUILD_DIR" -DWITH_DPDK="$with_dpdk"
-cmake --build "$BUILD_DIR"
+case "$mode" in
+    auto)   build_one AUTO build analyser ;;
+    dpdk)   build_one ON   build analyser ;;
+    nodpdk) build_one OFF  build analyser ;;
+    both)
+        build_one ON  build-dpdk   analyser-dpdk
+        build_one OFF build-nodpdk analyser-nodpdk
+        ;;
+    clean)
+        rm -rf build build-dpdk build-nodpdk
+        exit 0
+        ;;
+    -h | --help | help)
+        sed -n '2,9p' "$0"
+        exit 0
+        ;;
+    *)
+        echo "unknown mode '$mode' (try: auto | dpdk | nodpdk | both | clean)" >&2
+        exit 2
+        ;;
+esac
