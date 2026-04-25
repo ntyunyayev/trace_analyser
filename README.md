@@ -135,7 +135,7 @@ Only effective when the binary was built with DPDK on (`./build.sh dpdk`).
 | `--dpdk_mbuf_pool_size`       | int32   | `4095`    | mbuf pool size per DPDK device. Must be `2^q − 1`.                                                                                                                |
 | `--duration_sec`              | int32   | `0`       | Stop capture after N seconds (`0` = no limit).                                                                                                                    |
 | `--max_packets`               | uint64  | `0`       | Stop capture after N classified packets across all workers (`0` = no limit).                                                                                      |
-| `--dpdk_stats_interval_sec`   | int32   | `1`       | NIC stats sample interval in seconds: rxPackets, `rxPacketsDroppedByHW`, `rxErroneousPackets`, `rxMbufAlocFailed`. `0` disables periodic logging; a final summary is always emitted at stop. |
+| `--dpdk_stats_interval_sec`   | int32   | `1`       | NIC stats sample interval in seconds: `rx`, `cpu_missed` (= DPDK's `imissed`: NIC dropped because the host CPU couldn't drain the RX queue fast enough), `erroneous`, `mbuf_alloc_fail`. `0` disables periodic logging; a final summary is always emitted at stop. |
 
 Stop conditions are OR-combined: SIGINT (Ctrl-C), `--duration_sec`, or
 `--max_packets` — whichever fires first triggers a clean shutdown and writes

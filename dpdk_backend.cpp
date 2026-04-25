@@ -113,7 +113,7 @@ uint64_t totalProcessed(const DpdkSharedState &shared) {
 void printDpdkStats(const std::string &tag, const pcpp::DpdkDevice::DpdkDeviceStats &stats) {
     std::cerr << "[dpdk-stats " << tag << "] rx=" << stats.aggregatedRxStats.packets
               << " bytes=" << stats.aggregatedRxStats.bytes
-              << " dropped(HW)=" << stats.rxPacketsDroppedByHW
+              << " cpu_missed=" << stats.rxPacketsDroppedByHW
               << " erroneous=" << stats.rxErroneousPackets
               << " mbuf_alloc_fail=" << stats.rxMbufAlocFailed << std::endl;
 }
@@ -208,7 +208,7 @@ int run_dpdk_capture(ProcessingContext &ctx) {
     }
 
     std::cerr << "Captured " << ctx.packetsProcessed << " packets ("
-              << finalStats.rxPacketsDroppedByHW << " dropped by NIC, "
+              << finalStats.rxPacketsDroppedByHW << " CPU missed, "
               << finalStats.rxMbufAlocFailed << " mbuf alloc failures)" << std::endl;
     return 0;
 }
