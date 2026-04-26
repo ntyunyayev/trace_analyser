@@ -13,7 +13,8 @@ set_property(CACHE WITH_DPDK PROPERTY STRINGS AUTO ON OFF)
 
 # Vendored prefixes (build.sh populates these via meson + cmake).
 set(_dpdk_install "${CMAKE_SOURCE_DIR}/external/dpdk/install")
-set(_dpdk_libdir  "${_dpdk_install}/lib/x86_64-linux-gnu")
+# build.sh pins meson --libdir=lib so this path is the same on every distro.
+set(_dpdk_libdir  "${_dpdk_install}/lib")
 set(_pcpp_install_dpdk   "${CMAKE_SOURCE_DIR}/external/PcapPlusPlus/install-dpdk")
 set(_pcpp_install_nodpdk "${CMAKE_SOURCE_DIR}/external/PcapPlusPlus/install-nodpdk")
 
@@ -54,7 +55,7 @@ set_target_properties(analyser PROPERTIES
     # to the binary location ($ORIGIN = the directory of the binary), pointing
     # at the vendored DPDK install under external/dpdk/install/.
     BUILD_WITH_INSTALL_RPATH TRUE
-    INSTALL_RPATH "$ORIGIN/external/dpdk/install/lib/x86_64-linux-gnu"
+    INSTALL_RPATH "$ORIGIN/external/dpdk/install/lib"
 )
 
 if(_use_dpdk)

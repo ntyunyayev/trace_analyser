@@ -21,7 +21,11 @@ set -euo pipefail
 
 EXT="$(pwd)/external"
 DPDK_PREFIX="$EXT/dpdk/install"
-DPDK_LIBDIR="$DPDK_PREFIX/lib/x86_64-linux-gnu"
+# Pin meson's --libdir to "lib" so the install layout is identical on every
+# distro. Without this, Debian/Ubuntu install into lib/x86_64-linux-gnu/
+# (multi-arch) and Fedora into lib64/, which makes PKG_CONFIG_PATH
+# unportable. We force "lib" in build_dpdk's meson invocation below.
+DPDK_LIBDIR="$DPDK_PREFIX/lib"
 
 require_submodules() {
     [ -d "$EXT/dpdk/.git" ] || [ -f "$EXT/dpdk/.git" ] || {
@@ -41,6 +45,7 @@ build_dpdk() {
     require_submodules
     echo "==> Building DPDK into $DPDK_PREFIX (one-time, ~10 min)"
     meson setup --prefix="$DPDK_PREFIX" \
+                --libdir=lib \
                 -Ddefault_library=static \
                 "$EXT/dpdk/build" "$EXT/dpdk"
     ninja -C "$EXT/dpdk/build" install
