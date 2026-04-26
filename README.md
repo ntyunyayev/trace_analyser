@@ -1,9 +1,27 @@
 # What is the project about?
 
+A per-protocol traffic analyser built on PcapPlusPlus. It reads either an
+offline pcap/pcapng file or captures live from a DPDK-bound NIC (single-thread
+or multi-core RSS), classifies each packet into a protocol bucket
+(IPv4/IPv6 × TCP/UDP, with HTTPS/2 and HTTPS/3 broken out separately), and
+emits one or more CSV reports.
 
-This is a small project, that aims to provide a script to analyse the protocol distribution from large traces. It relies on PCAP++.
+For each protocol bucket the main report contains:
 
-The tool provides for each protocol, the total number of packets, bytes and connections.
+- packet count, total bytes
+- distinct 5-tuple connections
+- distinct client-side IPs ("users", inferred from the higher-port endpoint)
+
+Optional add-ons (each gated by its own flag, see the [Flags](#flags) section):
+
+- per-connection average packet-index distance between consecutive packets
+  of the same flow (useful for studying interleaving)
+- per-protocol distribution of IP and TCP header sizes (useful for spotting
+  IPv4/IPv6 options usage, IPv6 extension headers, and TCP-options
+  negotiation rates such as timestamps and SACK)
+- when running over DPDK: periodic and final NIC drop counters
+  (`rxPacketsDroppedByHW` etc.) so you can tell whether your CPU is keeping
+  up with the wire
 
 ## Prerequisites
 
