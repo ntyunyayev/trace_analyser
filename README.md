@@ -30,12 +30,12 @@ built once into project-local prefixes; they don't need to be installed
 globally. You only need DPDK's own build/runtime deps system-wide:
 
     # Debian / Ubuntu
-    sudo apt install python3 meson ninja-build pkg-config \
+    sudo apt install python3 python3-pyelftools meson ninja-build pkg-config \
                      libnuma-dev libpcap-dev linux-headers-$(uname -r) \
                      build-essential cmake
 
     # RHEL / Fedora
-    sudo dnf install python3 meson ninja-build pkg-config \
+    sudo dnf install python3 python3-pyelftools meson ninja-build pkg-config \
                      numactl-devel libpcap-devel kernel-devel \
                      gcc-c++ cmake
 
