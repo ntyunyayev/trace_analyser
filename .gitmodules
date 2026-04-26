@@ -1,0 +1,8 @@
+[submodule "external/dpdk"]
+	path = external/dpdk
+	url = https://github.com/DPDK/dpdk.git
+	branch = main
+[submodule "external/PcapPlusPlus"]
+	path = external/PcapPlusPlus
+	url = https://github.com/seladb/PcapPlusPlus.git
+	branch = master

@@ -1,41 +1,140 @@
 #include "helper.h"
 
-DEFINE_string(input_file, "input.pcap", "Input file");
+#include <cstdint>
+#include <cstdlib>
+#include <getopt.h>
+#include <iostream>
+#include <string>
 
-DEFINE_string(output_csv, "stats.csv", "Path to the output CSV file");
+std::string FLAGS_input_file = "input.pcap";
+std::string FLAGS_output_csv = "stats.csv";
 
-DEFINE_bool(compute_packet_distance, false,
-            "Compute per-protocol average packet-index distance between "
-            "consecutive packets of the same connection");
+bool FLAGS_compute_packet_distance = false;
+std::string FLAGS_output_connections_csv = "";
 
-DEFINE_string(output_connections_csv, "",
-              "If set, write per-connection CSV with packet-distance info to "
-              "this path (requires --compute_packet_distance)");
+bool FLAGS_compute_header_sizes = false;
+std::string FLAGS_output_header_sizes_csv = "";
 
-DEFINE_bool(compute_header_sizes, false,
-            "Count per-protocol distributions of IP and TCP header sizes");
+int32_t FLAGS_dpdk_port = -1;
+int32_t FLAGS_dpdk_mbuf_pool_size = 4095;
+std::string FLAGS_dpdk_eal_args = "-c 0x3";
 
-DEFINE_string(output_header_sizes_csv, "",
-              "If set, write header-size distribution CSV to this path "
-              "(requires --compute_header_sizes)");
+int32_t FLAGS_duration_sec = 0;
+uint64_t FLAGS_max_packets = 0;
+int32_t FLAGS_dpdk_stats_interval_sec = 1;
 
-DEFINE_int32(dpdk_port, -1,
-             "If >=0, capture live from this DPDK port ID instead of reading "
-             "--input_file");
+namespace {
 
-DEFINE_int32(dpdk_mbuf_pool_size, 4095, "mbuf pool size per DPDK device");
+enum : int {
+    OPT_INPUT_FILE = 1000,
+    OPT_OUTPUT_CSV,
+    OPT_COMPUTE_PACKET_DISTANCE,
+    OPT_OUTPUT_CONNECTIONS_CSV,
+    OPT_COMPUTE_HEADER_SIZES,
+    OPT_OUTPUT_HEADER_SIZES_CSV,
+    OPT_DPDK_PORT,
+    OPT_DPDK_MBUF_POOL_SIZE,
+    OPT_DPDK_EAL_ARGS,
+    OPT_DURATION_SEC,
+    OPT_MAX_PACKETS,
+    OPT_DPDK_STATS_INTERVAL_SEC,
+    OPT_HELP,
+};
 
-DEFINE_string(dpdk_eal_args, "-c 0x3",
-              "EAL args for rte_eal_init (space-separated). Must include "
-              "core selection via \"-c <hex_mask>\" (at least 2 cores: main + "
-              "1 worker). Other typical args: \"-a 0000:03:00.0\", "
-              "\"--file-prefix analyser\", \"--socket-mem 1024\"");
+const struct option kLongOpts[] = {
+    {"input_file", required_argument, nullptr, OPT_INPUT_FILE},
+    {"output_csv", required_argument, nullptr, OPT_OUTPUT_CSV},
+    {"compute_packet_distance", no_argument, nullptr, OPT_COMPUTE_PACKET_DISTANCE},
+    {"output_connections_csv", required_argument, nullptr, OPT_OUTPUT_CONNECTIONS_CSV},
+    {"compute_header_sizes", no_argument, nullptr, OPT_COMPUTE_HEADER_SIZES},
+    {"output_header_sizes_csv", required_argument, nullptr, OPT_OUTPUT_HEADER_SIZES_CSV},
+    {"dpdk_port", required_argument, nullptr, OPT_DPDK_PORT},
+    {"dpdk_mbuf_pool_size", required_argument, nullptr, OPT_DPDK_MBUF_POOL_SIZE},
+    {"dpdk_eal_args", required_argument, nullptr, OPT_DPDK_EAL_ARGS},
+    {"duration_sec", required_argument, nullptr, OPT_DURATION_SEC},
+    {"max_packets", required_argument, nullptr, OPT_MAX_PACKETS},
+    {"dpdk_stats_interval_sec", required_argument, nullptr, OPT_DPDK_STATS_INTERVAL_SEC},
+    {"help", no_argument, nullptr, OPT_HELP},
+    {nullptr, 0, nullptr, 0},
+};
 
-DEFINE_int32(duration_sec, 0, "Stop capture after N seconds (0 = no limit)");
+void printHelp(const char *prog) {
+    std::cout
+        << "Usage: " << prog << " [options]\n"
+        << "\n"
+        << "Input/output:\n"
+        << "  --input_file=<path>                 Input pcap (default: input.pcap)\n"
+        << "  --output_csv=<path>                 Per-protocol summary CSV (default: stats.csv)\n"
+        << "\n"
+        << "Per-connection packet distance:\n"
+        << "  --compute_packet_distance           Enable per-flow distance metric\n"
+        << "  --output_connections_csv=<path>     Per-connection CSV (requires "
+           "--compute_packet_distance)\n"
+        << "\n"
+        << "Header-size distribution:\n"
+        << "  --compute_header_sizes              Enable IP/TCP header-size histogram\n"
+        << "  --output_header_sizes_csv=<path>    Header-size CSV (requires "
+           "--compute_header_sizes)\n"
+        << "\n"
+        << "DPDK live capture (requires the dpdk-flavour binary):\n"
+        << "  --dpdk_port=<int>                   DPDK port id; <0 means file mode (default: -1)\n"
+        << "  --dpdk_eal_args=<str>               EAL args (default: \"-c 0x3\")\n"
+        << "  --dpdk_mbuf_pool_size=<2^q-1>       mbuf pool size (default: 4095)\n"
+        << "  --duration_sec=<int>                Stop after N seconds (0 = no limit)\n"
+        << "  --max_packets=<uint>                Stop after N packets (0 = no limit)\n"
+        << "  --dpdk_stats_interval_sec=<int>     NIC stats sample period in s (default: 1)\n"
+        << "\n"
+        << "  --help                              Print this message and exit\n";
+}
 
-DEFINE_uint64(max_packets, 0, "Stop capture after N packets (0 = no limit)");
+} // namespace
 
-DEFINE_int32(dpdk_stats_interval_sec, 1,
-             "DPDK NIC stats sample interval in seconds (rxPackets, drops, "
-             "mbuf failures). 0 disables periodic logging; a final summary is "
-             "always printed at stop.");
+void parseArgs(int argc, char **argv) {
+    int c;
+    while ((c = getopt_long(argc, argv, "", kLongOpts, nullptr)) != -1) {
+        switch (c) {
+        case OPT_INPUT_FILE:
+            FLAGS_input_file = optarg;
+            break;
+        case OPT_OUTPUT_CSV:
+            FLAGS_output_csv = optarg;
+            break;
+        case OPT_COMPUTE_PACKET_DISTANCE:
+            FLAGS_compute_packet_distance = true;
+            break;
+        case OPT_OUTPUT_CONNECTIONS_CSV:
+            FLAGS_output_connections_csv = optarg;
+            break;
+        case OPT_COMPUTE_HEADER_SIZES:
+            FLAGS_compute_header_sizes = true;
+            break;
+        case OPT_OUTPUT_HEADER_SIZES_CSV:
+            FLAGS_output_header_sizes_csv = optarg;
+            break;
+        case OPT_DPDK_PORT:
+            FLAGS_dpdk_port = std::atoi(optarg);
+            break;
+        case OPT_DPDK_MBUF_POOL_SIZE:
+            FLAGS_dpdk_mbuf_pool_size = std::atoi(optarg);
+            break;
+        case OPT_DPDK_EAL_ARGS:
+            FLAGS_dpdk_eal_args = optarg;
+            break;
+        case OPT_DURATION_SEC:
+            FLAGS_duration_sec = std::atoi(optarg);
+            break;
+        case OPT_MAX_PACKETS:
+            FLAGS_max_packets = std::strtoull(optarg, nullptr, 10);
+            break;
+        case OPT_DPDK_STATS_INTERVAL_SEC:
+            FLAGS_dpdk_stats_interval_sec = std::atoi(optarg);
+            break;
+        case OPT_HELP:
+            printHelp(argv[0]);
+            std::exit(0);
+        case '?':
+        default:
+            std::exit(2);
+        }
+    }
+}

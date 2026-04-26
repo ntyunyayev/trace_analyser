@@ -1,21 +1,25 @@
 #pragma once
 
-#include <gflags/gflags.h>
+#include <cstdint>
+#include <string>
 
-DECLARE_string(input_file);
-DECLARE_string(output_csv);
+extern std::string FLAGS_input_file;
+extern std::string FLAGS_output_csv;
 
-DECLARE_bool(compute_packet_distance);
-DECLARE_string(output_connections_csv);
+extern bool FLAGS_compute_packet_distance;
+extern std::string FLAGS_output_connections_csv;
 
-DECLARE_bool(compute_header_sizes);
-DECLARE_string(output_header_sizes_csv);
+extern bool FLAGS_compute_header_sizes;
+extern std::string FLAGS_output_header_sizes_csv;
 
-DECLARE_int32(dpdk_port);
-DECLARE_int32(dpdk_mbuf_pool_size);
-DECLARE_string(dpdk_eal_args);
+extern int32_t FLAGS_dpdk_port;
+extern int32_t FLAGS_dpdk_mbuf_pool_size;
+extern std::string FLAGS_dpdk_eal_args;
 
-DECLARE_int32(duration_sec);
-DECLARE_uint64(max_packets);
+extern int32_t FLAGS_duration_sec;
+extern uint64_t FLAGS_max_packets;
+extern int32_t FLAGS_dpdk_stats_interval_sec;
 
-DECLARE_int32(dpdk_stats_interval_sec);
+// Parse command-line flags into the FLAGS_* globals using POSIX getopt_long.
+// Exits the process on --help (status 0) or on unknown flags (status 2).
+void parseArgs(int argc, char **argv);

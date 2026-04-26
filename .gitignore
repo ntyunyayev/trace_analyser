@@ -39,3 +39,32 @@
 
 # debug information files
 *.dwo
+
+# CMake build dirs
+build/
+build-dpdk/
+build-nodpdk/
+build-dpdk-dbg/
+
+# Stray cmake artifacts (someone ran `cmake .` at the project root)
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# Built binaries
+analyser
+analyser-dpdk
+analyser-dpdk-dbg
+analyser-nodpdk
+
+# Run outputs
+*.csv
+out.txt
+perf.data
+perf.data.old
+
+# Vendored dependency build/install dirs (sources are tracked via submodules)
+external/*/build/
+external/*/install/
+external/*/install-*/

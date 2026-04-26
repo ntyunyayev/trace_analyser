@@ -25,126 +25,62 @@ Optional add-ons (each gated by its own flag, see the [Flags](#flags) section):
 
 ## Prerequisites
 
-- PcapPlusPlus
-- gflags
-- (optional, for the DPDK backend) DPDK, and a PcapPlusPlus build that
-  includes DPDK support — see below.
-
-### Installing gflags
-
-The analyser dynamically links `libgflags.so`. If the binary is moved to a
-machine that doesn't have it, you'll see:
-
-    ./analyser-nodpdk: error while loading shared libraries:
-    libgflags.so.2.2: cannot open shared object file: No such file or directory
-
-Install via the system package manager:
+PcapPlusPlus and DPDK are vendored as git submodules under `external/` and
+built once into project-local prefixes; they don't need to be installed
+globally. You only need DPDK's own build/runtime deps system-wide:
 
     # Debian / Ubuntu
-    sudo apt install libgflags2.2 libgflags-dev
+    sudo apt install python3 meson ninja-build pkg-config \
+                     libnuma-dev libpcap-dev linux-headers-$(uname -r) \
+                     build-essential cmake
 
-    # RHEL / Fedora / CentOS
-    sudo dnf install gflags gflags-devel
+    # RHEL / Fedora
+    sudo dnf install python3 meson ninja-build pkg-config \
+                     numactl-devel libpcap-devel kernel-devel \
+                     gcc-c++ cmake
 
-    # From source (any distro):
-    git clone https://github.com/gflags/gflags.git
-    cmake -S gflags -B gflags/build -DBUILD_SHARED_LIBS=ON
-    cmake --build gflags/build -j$(nproc)
-    sudo cmake --install gflags/build
+For DPDK runtime (only needed for the live-capture binary): mount hugepages
+and bind your NIC to `vfio-pci` (or `igb_uio`) per the standard DPDK setup.
 
-(`-dev`/`-devel` package is needed at build time; the runtime-only `.so` is
-sufficient on hosts that just run a pre-built binary.)
-
-## Building PcapPlusPlus with DPDK support
-
-The DPDK backend in this project compiles only when the installed PcapPlusPlus
-exposes its `DpdkDevice.h` / `DpdkDeviceList.h` headers, which are emitted
-only when pcpp itself was built with `-DPCAPPP_USE_DPDK=ON`. Stock distro
-packages and the precompiled releases on
-[github.com/seladb/PcapPlusPlus/releases](https://github.com/seladb/PcapPlusPlus/releases)
-are built with DPDK off, so you have to build pcpp from source against your
-DPDK install.
-
-### Prerequisites
-
-- DPDK installed (we used DPDK 23.03 here). `pkg-config --modversion libdpdk`
-  must return a version. If it doesn't, point `PKG_CONFIG_PATH` at your DPDK
-  install's `lib/pkgconfig` directory before invoking CMake.
-- PcapPlusPlus source checkout (`git clone https://github.com/seladb/PcapPlusPlus.git`).
-
-### Build & install
-
-In the PcapPlusPlus source tree:
-
-    cmake -S . -B build \
-          -DPCAPPP_USE_DPDK=ON \
-          -DDPDK_ROOT=<dpdk-install-prefix>
-    LIBRARY_PATH=<dpdk-install-prefix>/lib/x86_64-linux-gnu \
-        cmake --build build -j$(nproc)
-    sudo -E cmake --install build               # writes to /usr/local
-
-The `LIBRARY_PATH` prefix on the build step works around an upstream issue in
-pcpp's `cmake/modules/FindDPDK.cmake`: the `DPDK::DPDK` IMPORTED INTERFACE
-target sets `INTERFACE_LINK_LIBRARIES` (the `-lrte_*` names) but never sets
-`INTERFACE_LINK_DIRECTORIES`, so without `LIBRARY_PATH` the link line for
-pcpp's example binaries fails with `cannot find -lrte_mldev` even though the
-library is on disk. `sudo -E` is needed because `sudo` strips environment
-variables by default and the install step can re-link.
-
-If you'd rather skip the workaround, you can also disable Examples and Tests
-in the pcpp configure step (the libraries themselves still link fine):
-
-    cmake -S . -B build \
-          -DPCAPPP_USE_DPDK=ON \
-          -DDPDK_ROOT=<dpdk-install-prefix> \
-          -DPCAPPP_BUILD_EXAMPLES=OFF \
-          -DPCAPPP_BUILD_TESTS=OFF
-    cmake --build build -j$(nproc)
-    sudo cmake --install build
-
-### Optional: side-by-side install
-
-If you'd rather not overwrite the system PcapPlusPlus install at `/usr/local`,
-use a private prefix and tell this project's CMake about it via
-`CMAKE_PREFIX_PATH`:
-
-    cmake -S . -B build \
-          -DPCAPPP_USE_DPDK=ON \
-          -DDPDK_ROOT=<dpdk-install-prefix> \
-          -DCMAKE_INSTALL_PREFIX=$HOME/local-pcpp-dpdk
-    LIBRARY_PATH=<dpdk-install-prefix>/lib/x86_64-linux-gnu \
-        cmake --build build -j$(nproc)
-    cmake --install build                        # no sudo
-    # back in this project:
-    CMAKE_PREFIX_PATH=$HOME/local-pcpp-dpdk ./build.sh dpdk
-
-### Verifying
-
-After install, `/usr/local/include/pcapplusplus/DpdkDevice.h` should exist,
-and `./build.sh dpdk` here will print
-`DPDK backend: ENABLED (libdpdk <version>) [WITH_DPDK=ON]`.
+CLI flags are parsed via POSIX `getopt_long` (libc); no third-party flag
+library is needed.
 
 ## Building
 
-    ./build.sh           # auto-detect DPDK     -> ./analyser
-    ./build.sh dpdk      # require DPDK         -> ./analyser
-    ./build.sh nodpdk    # build without DPDK   -> ./analyser
-    ./build.sh both      # build both flavours  -> ./analyser-dpdk + ./analyser-nodpdk
-    ./build.sh clean     # rm -rf build build-dpdk build-nodpdk
+    git clone --recursive https://...trace_analyser.git
+    cd trace_analyser
+    ./build.sh dpdk        # first run: ~10 min DPDK + ~3 min pcpp + analyser
 
-Equivalent direct CMake invocation:
+If you forgot `--recursive` on the original clone:
+
+    git submodule update --init --recursive
+
+`./build.sh` modes:
+
+    ./build.sh           # auto-detect (uses DPDK if its install is built)  -> ./analyser
+    ./build.sh dpdk      # build vendored DPDK + pcpp(dpdk) + analyser      -> ./analyser
+    ./build.sh nodpdk    # build vendored pcpp(nodpdk) + analyser, no DPDK  -> ./analyser
+    ./build.sh both      # builds both flavours side-by-side                -> ./analyser-dpdk + ./analyser-nodpdk
+    ./build.sh deps-dpdk # only build the vendored DPDK
+    ./build.sh deps-pcpp # only build the vendored PcapPlusPlus
+    ./build.sh clean     # rm -rf all build dirs + vendored install dirs
+
+Subsequent `./build.sh dpdk` invocations skip the DPDK and pcpp steps (the
+project-local install dirs at `external/dpdk/install/` and
+`external/PcapPlusPlus/install-{dpdk,nodpdk}/` are reused as caches).
+
+The analyser binary has an `$ORIGIN`-relative RPATH baked in that points at
+the vendored DPDK install, so it finds `librte_*.so` at runtime without
+needing `LD_LIBRARY_PATH`. Same for pcpp — it's statically linked, so no
+`libPcap++.so` runtime dep either.
+
+Equivalent direct CMake invocation (after the deps are built):
 `cmake -S . -B build -DWITH_DPDK=AUTO|ON|OFF && cmake --build build`.
-The output binary name can be overridden with `-DANALYSER_NAME=<name>`.
-
-`./build.sh both` is the easy way to keep a DPDK and a non-DPDK binary side
-by side — useful for benchmarking the offline-only path against the DPDK
-build, or for shipping the no-DPDK variant to machines that don't have DPDK
-in their `LD_LIBRARY_PATH`.
 
 ## Flags
 
-All flags below are gflags (`--name=value` or `--name value`). `./analyser
---help` prints the live list.
+Flags are parsed with POSIX `getopt_long`; both `--name=value` and `--name
+value` are accepted. `./analyser --help` prints the live list.
 
 ### Input / output
 
