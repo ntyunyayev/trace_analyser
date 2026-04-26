@@ -35,6 +35,23 @@ endif()
 list(PREPEND CMAKE_PREFIX_PATH "${_pcpp_install}")
 if(_use_dpdk)
     set(ENV{PKG_CONFIG_PATH} "${_dpdk_libdir}/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+
+    # Pre-create the DPDK::DPDK IMPORTED target *before* find_package(PcapPlusPlus).
+    # pcpp's PcapPlusPlusConfig.cmake only calls find_dependency(DPDK) when
+    # NOT DPDK_FOUND, but DPDK_FOUND ends up cached after the first configure
+    # — so the second cmake invocation skips find_dependency(DPDK), the target
+    # is never re-created, and pcpp's exported targets fail to resolve. By
+    # creating DPDK::DPDK here unconditionally on every configure, we
+    # short-circuit pcpp's logic regardless of cache state.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DPDK REQUIRED libdpdk)
+    if(NOT TARGET DPDK::DPDK)
+        add_library(DPDK::DPDK INTERFACE IMPORTED)
+        set_target_properties(DPDK::DPDK PROPERTIES
+            INTERFACE_LINK_LIBRARIES   "${DPDK_LIBRARIES}"
+            INTERFACE_INCLUDE_DIRECTORIES "${DPDK_INCLUDE_DIRS}"
+            INTERFACE_COMPILE_OPTIONS  "${DPDK_CFLAGS_OTHER}")
+    endif()
 endif()
 
 find_package(PcapPlusPlus REQUIRED)
@@ -59,8 +76,8 @@ set_target_properties(analyser PROPERTIES
 )
 
 if(_use_dpdk)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(DPDK REQUIRED libdpdk)
+    # pkg_check_modules(DPDK ...) already ran above (before find_package
+    # PcapPlusPlus), so DPDK_* vars are populated.
     target_sources(analyser PRIVATE src/dpdk_backend.cpp)
     target_compile_options(analyser PRIVATE ${DPDK_CFLAGS_OTHER})
     target_include_directories(analyser PRIVATE ${DPDK_INCLUDE_DIRS})

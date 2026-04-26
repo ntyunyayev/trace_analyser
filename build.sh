@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Usage:
 #   ./build.sh           # auto-detect DPDK (default)         -> ./analyser
-#   ./build.sh dpdk      # build with DPDK                    -> ./analyser
-#   ./build.sh nodpdk    # build without DPDK                 -> ./analyser
+#   ./build.sh dpdk      # build with DPDK                    -> ./analyser-dpdk
+#   ./build.sh nodpdk    # build without DPDK                 -> ./analyser-nodpdk
 #   ./build.sh both      # build both flavours side-by-side   -> ./analyser-dpdk + ./analyser-nodpdk
 #   ./build.sh deps-dpdk # only build the vendored DPDK
 #   ./build.sh deps-pcpp # only build the vendored PcapPlusPlus
@@ -98,9 +98,9 @@ build_one() {
 mode=${1:-auto}
 
 case "$mode" in
-    auto)      build_one AUTO build analyser ;;
-    dpdk)      build_one ON   build analyser ;;
-    nodpdk)    build_one OFF  build analyser ;;
+    auto)      build_one AUTO build         analyser ;;
+    dpdk)      build_one ON   build-dpdk    analyser-dpdk ;;
+    nodpdk)    build_one OFF  build-nodpdk  analyser-nodpdk ;;
     both)
         build_one ON  build-dpdk   analyser-dpdk
         build_one OFF build-nodpdk analyser-nodpdk
