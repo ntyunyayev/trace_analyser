@@ -42,9 +42,10 @@ set(ANALYSER_NAME "analyser" CACHE STRING "Output name of the analyser binary")
 
 add_executable(analyser
     main.cpp
-    helper.cpp
-    processing.cpp
+    src/helper.cpp
+    src/processing.cpp
 )
+target_include_directories(analyser PRIVATE src)
 target_link_libraries(analyser PUBLIC PcapPlusPlus::Pcap++)
 set_target_properties(analyser PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -59,7 +60,7 @@ set_target_properties(analyser PROPERTIES
 if(_use_dpdk)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(DPDK REQUIRED libdpdk)
-    target_sources(analyser PRIVATE dpdk_backend.cpp)
+    target_sources(analyser PRIVATE src/dpdk_backend.cpp)
     target_compile_options(analyser PRIVATE ${DPDK_CFLAGS_OTHER})
     target_include_directories(analyser PRIVATE ${DPDK_INCLUDE_DIRS})
 
@@ -93,6 +94,6 @@ if(_use_dpdk)
     target_link_libraries(analyser PUBLIC ${_dpdk_link})
     message(STATUS "DPDK backend: ENABLED [vendored libdpdk @ ${_dpdk_install}, static]")
 else()
-    target_sources(analyser PRIVATE dpdk_stub.cpp)
+    target_sources(analyser PRIVATE src/dpdk_stub.cpp)
     message(STATUS "DPDK backend: DISABLED [WITH_DPDK=${WITH_DPDK}]")
 endif()
