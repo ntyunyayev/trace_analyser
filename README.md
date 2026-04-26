@@ -57,25 +57,55 @@ If you forgot `--recursive` on the original clone:
 
 `./build.sh` modes:
 
-    ./build.sh           # auto-detect (uses DPDK if its install is built)  -> ./analyser
-    ./build.sh dpdk      # build vendored DPDK + pcpp(dpdk) + analyser      -> ./analyser
-    ./build.sh nodpdk    # build vendored pcpp(nodpdk) + analyser, no DPDK  -> ./analyser
-    ./build.sh both      # builds both flavours side-by-side                -> ./analyser-dpdk + ./analyser-nodpdk
-    ./build.sh deps-dpdk # only build the vendored DPDK
-    ./build.sh deps-pcpp # only build the vendored PcapPlusPlus
-    ./build.sh clean     # rm -rf all build dirs + vendored install dirs
+    ./build.sh             # auto-detect (uses DPDK if its install is built)  -> ./analyser
+    ./build.sh dpdk        # build vendored DPDK + pcpp(dpdk) + analyser      -> ./analyser
+    ./build.sh nodpdk      # build vendored pcpp(nodpdk) + analyser, no DPDK  -> ./analyser
+    ./build.sh both        # both flavours side-by-side  -> ./analyser-dpdk + ./analyser-nodpdk
+    ./build.sh deps-dpdk   # only build the vendored DPDK
+    ./build.sh deps-pcpp   # only build the vendored PcapPlusPlus
+    ./build.sh clean       # rm -rf analyser build dirs only (KEEPS vendored deps)
+    ./build.sh clean-dpdk  # rm -rf vendored DPDK build/install
+    ./build.sh clean-pcpp  # rm -rf vendored PcapPlusPlus build/install
+    ./build.sh clean-deps  # both clean-dpdk and clean-pcpp
+    ./build.sh clean-all   # clean + clean-deps  (forces full ~10-min rebuild)
 
 Subsequent `./build.sh dpdk` invocations skip the DPDK and pcpp steps (the
 project-local install dirs at `external/dpdk/install/` and
-`external/PcapPlusPlus/install-{dpdk,nodpdk}/` are reused as caches).
+`external/PcapPlusPlus/install-{dpdk,nodpdk}/` are reused as caches). Use
+`./build.sh clean` when you want to rebuild only the analyser; reach for
+`clean-deps` / `clean-all` only when you actually need to rebuild the
+vendored DPDK or pcpp.
 
-The analyser binary has an `$ORIGIN`-relative RPATH baked in that points at
-the vendored DPDK install, so it finds `librte_*.so` at runtime without
-needing `LD_LIBRARY_PATH`. Same for pcpp — it's statically linked, so no
-`libPcap++.so` runtime dep either.
+### Linkage
+
+Both DPDK (`-Ddefault_library=static` at meson configure) and PcapPlusPlus
+(`-DBUILD_SHARED_LIBS=OFF`) are statically linked into the analyser binary.
+The only meaningful runtime dependency is `libpcap.so` from the system. Result:
+
+    $ ldd ./analyser-dpdk | grep -v '=> /lib'
+            linux-vdso.so.1 ...                       (kernel)
+            libpcap.so.0.8 => /lib/x86_64-linux-gnu/libpcap.so.0.8 ...
+
+No `librte_*.so`, no `libPcap++.so`, no `libgflags.so`. The DPDK binary is
+~28 MB (DPDK static archives baked in); the no-DPDK binary is ~2 MB.
 
 Equivalent direct CMake invocation (after the deps are built):
 `cmake -S . -B build -DWITH_DPDK=AUTO|ON|OFF && cmake --build build`.
+
+### Project layout
+
+    trace_analyser/
+    ├── main.cpp                 orchestrator (file/DPDK dispatch, CSV writers)
+    ├── src/
+    │   ├── core_types.h         FlowKey/UserKey/ProtocolStats/etc. + std::hash specs
+    │   ├── helper.{h,cpp}       FLAGS_* globals + getopt_long parser
+    │   ├── processing.{h,cpp}   processPacket + extractL3/extractL4/canonicalize/updateStats
+    │   ├── dpdk_backend.{h,cpp} live-capture path, compiled iff WITH_DPDK
+    │   └── dpdk_stub.cpp        compiled iff !WITH_DPDK; errors at runtime
+    ├── CMakeLists.txt           includes src/ via target_include_directories
+    ├── build.sh                 see modes above
+    ├── .clang-format            LLVM base, IndentWidth: 4, SortIncludes: false
+    └── external/                git submodules (dpdk, PcapPlusPlus)
 
 ## Flags
 
@@ -124,34 +154,37 @@ the configured CSVs.
 
 ### Offline (pcap file)
 
-sudo  ./analyser --input_file=<trace.pcap> --output_csv=<output.csv>
+    ./analyser --input_file=<trace.pcap> --output_csv=<output.csv>
+
+No `sudo` needed — the file path doesn't touch DPDK or kernel resources.
 
 ### Live (DPDK)
 
-Requires a PcapPlusPlus build with DPDK support (see
-[Building PcapPlusPlus with DPDK support](#building-pcapplusplus-with-dpdk-support)
-above). If `cmake` prints `DPDK backend: ENABLED` here, the DPDK path is
-compiled in.
+Requires the binary built with `./build.sh dpdk` (or `both`). At runtime,
+pass `--dpdk_port=<id>` instead of `--input_file`. Cores are selected
+inside `--dpdk_eal_args` via `-c <hex>` (a DPDK EAL core mask; needs at
+least 2 bits set — main + 1 worker; multiple worker bits → multi-thread
+RSS capture). Any other standard EAL args (`-a <pci>`, `--file-prefix`,
+`--socket-mem`, ...) can be appended to the same string.
 
-At runtime, pass `--dpdk_port=<id>` instead of `--input_file`. Cores are
-selected inside `--dpdk_eal_args` via `-c <hex>` (a DPDK EAL core mask; needs
-at least 2 bits set — main + 1 worker). Any other standard EAL args
-(`-a <pci>`, `--file-prefix`, `--socket-mem`, ...) can be appended to the same
-string.
+    sudo ./analyser-dpdk --dpdk_port=0 --dpdk_eal_args="-c 0xff -a 0000:03:00.0" \
+                         --duration_sec=10 --output_csv=live.csv
 
-    sudo ./analyser --dpdk_port=0 --dpdk_eal_args="-c 0x3 -a 0000:03:00.0" \
-                    --duration_sec=10 --output_csv=live.csv
+`sudo` is required for DPDK (hugepages, vfio device access). Because DPDK is
+statically linked, no `LD_LIBRARY_PATH` / `sudo -E` is needed.
 
 Stop conditions (any of them triggers a clean shutdown + CSV write):
 Ctrl-C (SIGINT), `--duration_sec=N`, or `--max_packets=N`.
 
-### Header-size distribution
+### Add-on metrics
+
+Combine flags freely with either offline or live mode:
 
     ./analyser --input_file=<trace.pcap> --output_csv=<stats.csv> \
-               --compute_header_sizes --output_header_sizes_csv=<hdr.csv>
+               --compute_packet_distance --output_connections_csv=<conns.csv> \
+               --compute_header_sizes    --output_header_sizes_csv=<hdr.csv>
 
-Produces a long-format CSV (`Protocol,Header,Size_Bytes,Count`) with one row
-per `(protocol bucket, IP|TCP, observed header size)` — useful for spotting
-IPv4 options, IPv6 extension headers, and TCP options usage. UDP is omitted
-(always 8 bytes).
+`<stats.csv>` is always written; `<conns.csv>` and `<hdr.csv>` only when
+their respective `--compute_*` flag is set. See the [Flags](#flags) table
+for the full list.
 
