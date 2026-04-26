@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage:
-#   ./build.sh           # auto-detect DPDK (default)         -> ./analyser
+#   ./build.sh           # no args == nodpdk                  -> ./analyser-nodpdk
 #   ./build.sh dpdk      # build with DPDK                    -> ./analyser-dpdk
 #   ./build.sh nodpdk    # build without DPDK                 -> ./analyser-nodpdk
 #   ./build.sh both      # build both flavours side-by-side   -> ./analyser-dpdk + ./analyser-nodpdk
@@ -95,10 +95,9 @@ build_one() {
     cmake --build "$build_dir" -j"$(nproc)"
 }
 
-mode=${1:-auto}
+mode=${1:-nodpdk}
 
 case "$mode" in
-    auto)      build_one AUTO build         analyser ;;
     dpdk)      build_one ON   build-dpdk    analyser-dpdk ;;
     nodpdk)    build_one OFF  build-nodpdk  analyser-nodpdk ;;
     both)
@@ -140,7 +139,7 @@ case "$mode" in
         exit 0
         ;;
     *)
-        echo "unknown mode '$mode' (try: auto | dpdk | nodpdk | both | deps-dpdk | deps-pcpp | clean | clean-dpdk | clean-pcpp | clean-deps | clean-all)" >&2
+        echo "unknown mode '$mode' (try: dpdk | nodpdk | both | deps-dpdk | deps-pcpp | clean | clean-dpdk | clean-pcpp | clean-deps | clean-all)" >&2
         exit 2
         ;;
 esac

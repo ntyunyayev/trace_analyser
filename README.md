@@ -57,7 +57,7 @@ If you forgot `--recursive` on the original clone:
 
 `./build.sh` modes:
 
-    ./build.sh             # auto-detect (uses DPDK if its install is built)  -> ./analyser
+    ./build.sh             # no args == nodpdk                                -> ./analyser-nodpdk
     ./build.sh dpdk        # build vendored DPDK + pcpp(dpdk) + analyser      -> ./analyser-dpdk
     ./build.sh nodpdk      # build vendored pcpp(nodpdk) + analyser, no DPDK  -> ./analyser-nodpdk
     ./build.sh both        # both flavours side-by-side  -> ./analyser-dpdk + ./analyser-nodpdk
