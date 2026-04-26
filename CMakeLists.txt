@@ -62,12 +62,36 @@ if(_use_dpdk)
     target_sources(analyser PRIVATE dpdk_backend.cpp)
     target_compile_options(analyser PRIVATE ${DPDK_CFLAGS_OTHER})
     target_include_directories(analyser PRIVATE ${DPDK_INCLUDE_DIRS})
-    # pcpp's INTERFACE_LINK_LIBRARIES drags DPDK::DPDK in but the upstream
-    # FindDPDK.cmake doesn't set INTERFACE_LINK_DIRECTORIES — supply the -L
-    # explicitly so -lrte_* resolves.
-    target_link_directories(analyser PRIVATE ${DPDK_LIBRARY_DIRS})
-    target_link_libraries(analyser PUBLIC ${DPDK_LIBRARIES})
-    message(STATUS "DPDK backend: ENABLED [vendored libdpdk @ ${_dpdk_install}]")
+
+    # DPDK is built static (-Ddefault_library=static). pkg-config --static
+    # returns -l:librte_X.a flags. The linker would resolve those via its -L
+    # search path, which on this system also includes /usr/local/lib — where
+    # a stale unrelated DPDK install sits. To make the link unambiguous,
+    # rewrite each -l:librte_X.a token to an absolute path inside our vendored
+    # install, and drop pkg-config's -L hints entirely.
+    execute_process(
+        COMMAND ${PKG_CONFIG_EXECUTABLE} --static --libs libdpdk
+        OUTPUT_VARIABLE _dpdk_static_raw
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    separate_arguments(_dpdk_static_args NATIVE_COMMAND "${_dpdk_static_raw}")
+    set(_dpdk_link)
+    foreach(_flag IN LISTS _dpdk_static_args)
+        if(_flag MATCHES "^-l:(lib.+\\.a)$")
+            list(APPEND _dpdk_link "${_dpdk_libdir}/${CMAKE_MATCH_1}")
+        elseif(_flag MATCHES "^-L")
+            # drop — we use absolute paths above
+        else()
+            list(APPEND _dpdk_link "${_flag}")
+        endif()
+    endforeach()
+
+    # Belt-and-suspenders for any remaining -lrte_* (e.g. from pcpp's
+    # interface): put our vendored libdir BEFORE the system search path so
+    # those resolve to vendored, not /usr/local/lib.
+    target_link_directories(analyser BEFORE PRIVATE "${_dpdk_libdir}")
+    target_link_libraries(analyser PUBLIC ${_dpdk_link})
+    message(STATUS "DPDK backend: ENABLED [vendored libdpdk @ ${_dpdk_install}, static]")
 else()
     target_sources(analyser PRIVATE dpdk_stub.cpp)
     message(STATUS "DPDK backend: DISABLED [WITH_DPDK=${WITH_DPDK}]")

@@ -5,8 +5,12 @@
 #   ./build.sh nodpdk    # build without DPDK                 -> ./analyser
 #   ./build.sh both      # build both flavours side-by-side   -> ./analyser-dpdk + ./analyser-nodpdk
 #   ./build.sh deps-dpdk # only build the vendored DPDK
-#   ./build.sh deps-pcpp # only build the vendored PcapPlusPlus (use after deps-dpdk for DPDK flavour)
-#   ./build.sh clean     # rm -rf build dirs + vendored install dirs
+#   ./build.sh deps-pcpp # only build the vendored PcapPlusPlus
+#   ./build.sh clean     # rm -rf analyser build dirs (KEEPS vendored deps)
+#   ./build.sh clean-dpdk# rm -rf vendored DPDK build/install
+#   ./build.sh clean-pcpp# rm -rf vendored PcapPlusPlus build/install
+#   ./build.sh clean-deps# both clean-dpdk and clean-pcpp
+#   ./build.sh clean-all # clean + clean-deps  (forces full ~10-min rebuild)
 #
 # DPDK and PcapPlusPlus are vendored as git submodules under external/. Their
 # builds happen ONCE into project-local prefixes (external/dpdk/install,
@@ -36,7 +40,9 @@ build_dpdk() {
     fi
     require_submodules
     echo "==> Building DPDK into $DPDK_PREFIX (one-time, ~10 min)"
-    meson setup --prefix="$DPDK_PREFIX" "$EXT/dpdk/build" "$EXT/dpdk"
+    meson setup --prefix="$DPDK_PREFIX" \
+                -Ddefault_library=static \
+                "$EXT/dpdk/build" "$EXT/dpdk"
     ninja -C "$EXT/dpdk/build" install
 }
 
@@ -98,17 +104,38 @@ case "$mode" in
     deps-pcpp) build_pcpp "${2:-ON}" ;;
     clean)
         rm -rf build build-dpdk build-nodpdk build-dpdk-dbg
+        rm -f analyser analyser-dpdk analyser-nodpdk analyser-dpdk-dbg
+        exit 0
+        ;;
+    clean-dpdk)
+        rm -rf "$EXT/dpdk/build" "$DPDK_PREFIX"
+        exit 0
+        ;;
+    clean-pcpp)
+        rm -rf "$EXT/PcapPlusPlus/build-on" "$EXT/PcapPlusPlus/build-off"
+        rm -rf "$EXT/PcapPlusPlus/install-dpdk" "$EXT/PcapPlusPlus/install-nodpdk"
+        exit 0
+        ;;
+    clean-deps)
+        rm -rf "$EXT/dpdk/build" "$DPDK_PREFIX"
+        rm -rf "$EXT/PcapPlusPlus/build-on" "$EXT/PcapPlusPlus/build-off"
+        rm -rf "$EXT/PcapPlusPlus/install-dpdk" "$EXT/PcapPlusPlus/install-nodpdk"
+        exit 0
+        ;;
+    clean-all)
+        rm -rf build build-dpdk build-nodpdk build-dpdk-dbg
+        rm -f analyser analyser-dpdk analyser-nodpdk analyser-dpdk-dbg
         rm -rf "$EXT/dpdk/build" "$DPDK_PREFIX"
         rm -rf "$EXT/PcapPlusPlus/build-on" "$EXT/PcapPlusPlus/build-off"
         rm -rf "$EXT/PcapPlusPlus/install-dpdk" "$EXT/PcapPlusPlus/install-nodpdk"
         exit 0
         ;;
     -h | --help | help)
-        sed -n '2,12p' "$0"
+        sed -n '2,16p' "$0"
         exit 0
         ;;
     *)
-        echo "unknown mode '$mode' (try: auto | dpdk | nodpdk | both | deps-dpdk | deps-pcpp | clean)" >&2
+        echo "unknown mode '$mode' (try: auto | dpdk | nodpdk | both | deps-dpdk | deps-pcpp | clean | clean-dpdk | clean-pcpp | clean-deps | clean-all)" >&2
         exit 2
         ;;
 esac
